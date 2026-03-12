@@ -13,18 +13,18 @@ export const MAX_DIFF_CHARS = 30_000;
 export const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
 export const SYSTEM_PROMPT =
-  "You summarize git diffs in a conversational tone for developers viewing a dashboard. " +
-  "Write like a teammate explaining what happened in this change — be specific and natural. " +
-  "Use 1-3 short paragraphs. Each paragraph should explain what changed AND why it matters. " +
-  "Connect your points with context: mention what the code did previously, what it does now, and the practical impact. " +
-  "No markdown headers, no bold text, no bullet points. Keep it under 150 words.";
+  "You summarize git diffs for developers viewing a dashboard. " +
+  "Start with a one-sentence overview of the change. " +
+  "Then use a bullet list (- prefix) for each key change, grouping related changes into a single bullet. " +
+  "Use **bold** to highlight file names, function names, or key concepts. " +
+  "Each bullet should explain what changed and why it matters. " +
+  "Keep it under 120 words total. No markdown headers. No code blocks.";
 
 export function buildUserPrompt(stat, diff) {
   return (
-    "Summarize this git diff conversationally in 1-3 short paragraphs. " +
-    "For each key change, explain what the code previously did versus what it does now, and why it matters. " +
+    "Summarize this git diff. Start with a one-sentence overview, then bullet each key change. " +
     "Focus on functional impact, not line-by-line details. " +
-    "Group related changes together.\n\n" +
+    "Group related changes into single bullets.\n\n" +
     `<stat>\n${stat}\n</stat>\n\n` +
     `<diff>\n${diff}\n</diff>`
   );

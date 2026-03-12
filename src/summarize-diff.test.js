@@ -10,8 +10,8 @@ import {
 describe("summarize-diff constants", () => {
   it("exports a non-empty system prompt", () => {
     expect(SYSTEM_PROMPT.length).toBeGreaterThan(0);
-    expect(SYSTEM_PROMPT).toContain("conversational");
-    expect(SYSTEM_PROMPT).toContain("150 words");
+    expect(SYSTEM_PROMPT).toContain("dashboard");
+    expect(SYSTEM_PROMPT).toContain("120 words");
   });
 
   it("exports a default model", () => {
@@ -33,7 +33,7 @@ describe("buildUserPrompt", () => {
   it("includes the instruction text", () => {
     const prompt = buildUserPrompt("", "");
     expect(prompt).toContain("Summarize this git diff");
-    expect(prompt).toContain("conversationally");
+    expect(prompt).toContain("one-sentence overview");
     expect(prompt).toContain("functional impact");
   });
 });
