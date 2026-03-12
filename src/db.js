@@ -83,6 +83,34 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(session_id, branch_name);
+
+  -- Crafting workbench tables (agent composition UI)
+  CREATE TABLE IF NOT EXISTS craft_agents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    prompt_snippet TEXT NOT NULL,
+    icon TEXT NOT NULL DEFAULT 'default',
+    color TEXT NOT NULL DEFAULT '#4ade80',
+    tags TEXT DEFAULT '[]',
+    model_preference TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS craft_recipes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    synthesized_prompt TEXT,
+    ingredient_ids TEXT NOT NULL DEFAULT '[]',
+    icon TEXT NOT NULL DEFAULT '#fbbf24',
+    color TEXT NOT NULL DEFAULT '#fbbf24',
+    tags TEXT DEFAULT '[]',
+    model_preference TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 /**
@@ -449,5 +477,41 @@ export function deleteSession(sessionId) {
 
   return true;
 }
+
+// --- Crafting workbench ---
+
+export const getAllCraftAgents = db.prepare(`SELECT * FROM craft_agents ORDER BY name`);
+export const getCraftAgent = db.prepare(`SELECT * FROM craft_agents WHERE id = $id`);
+export const insertCraftAgent = db.prepare(`
+  INSERT INTO craft_agents (name, description, prompt_snippet, icon, color, tags, model_preference)
+  VALUES ($name, $description, $promptSnippet, $icon, $color, $tags, $modelPreference)
+  RETURNING *
+`);
+export const updateCraftAgentStmt = db.prepare(`
+  UPDATE craft_agents SET
+    name = $name, description = $description, prompt_snippet = $promptSnippet,
+    icon = $icon, color = $color, tags = $tags, model_preference = $modelPreference,
+    updated_at = datetime('now')
+  WHERE id = $id
+  RETURNING *
+`);
+export const deleteCraftAgentStmt = db.prepare(`DELETE FROM craft_agents WHERE id = $id`);
+
+export const getAllCraftRecipes = db.prepare(`SELECT * FROM craft_recipes ORDER BY updated_at DESC`);
+export const getCraftRecipe = db.prepare(`SELECT * FROM craft_recipes WHERE id = $id`);
+export const insertCraftRecipe = db.prepare(`
+  INSERT INTO craft_recipes (name, description, synthesized_prompt, ingredient_ids, icon, color, tags, model_preference)
+  VALUES ($name, $description, $synthesizedPrompt, $ingredientIds, $icon, $color, $tags, $modelPreference)
+  RETURNING *
+`);
+export const updateCraftRecipeStmt = db.prepare(`
+  UPDATE craft_recipes SET
+    name = $name, description = $description, synthesized_prompt = $synthesizedPrompt,
+    ingredient_ids = $ingredientIds, icon = $icon, color = $color, tags = $tags,
+    model_preference = $modelPreference, updated_at = datetime('now')
+  WHERE id = $id
+  RETURNING *
+`);
+export const deleteCraftRecipeStmt = db.prepare(`DELETE FROM craft_recipes WHERE id = $id`);
 
 export default db;
