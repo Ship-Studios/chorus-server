@@ -14,6 +14,7 @@ import promptRoutes from "./routes/prompt.js";
 import swarmRoutes from "./routes/swarm.js";
 import worktreeRoutes from "./routes/worktrees.js";
 import architectureRoutes from "./routes/architecture.js";
+import diffSummaryRoutes from "./routes/diff-summary.js";
 
 const PORT = process.env.PORT ?? 3001;
 
@@ -49,6 +50,7 @@ await app.register(promptRoutes);
 await app.register(swarmRoutes);
 await app.register(worktreeRoutes);
 await app.register(architectureRoutes);
+await app.register(diffSummaryRoutes);
 
 app.get("/api/health", async () => ({ status: "ok", uptime: process.uptime() }));
 

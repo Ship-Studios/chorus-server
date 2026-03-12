@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseDiffToFiles } from "./diff.js";
+import { parseDiffToFiles, buildStatSummary } from "./diff.js";
 
 // ─── parseDiffToFiles ───────────────────────────────────────────────────────
 
@@ -318,5 +318,142 @@ index ccc..ddd 100644
       const files = parseDiffToFiles(makeDiff(file));
       expect(files[0].fileLang).toBe(lang);
     }
+  });
+
+  // ─── Submodule diff support (--submodule=diff) ─────────────────
+
+  it("strips submodule header lines and parses submodule diffs", () => {
+    const diff = `Submodule packages/server contains modified content
+diff --git a/packages/server/src/db.js b/packages/server/src/db.js
+index aaa..bbb 100644
+--- a/packages/server/src/db.js
++++ b/packages/server/src/db.js
+@@ -1,2 +1,3 @@
+ const db = require("db");
++const cache = new Map();
+ module.exports = db;
+`;
+    const files = parseDiffToFiles(diff);
+    expect(files).toHaveLength(1);
+    expect(files[0].newFileName).toBe("packages/server/src/db.js");
+    expect(files[0].fileLang).toBe("javascript");
+    expect(files[0].hunkCount).toBe(1);
+  });
+
+  it("handles mixed parent repo + submodule diffs", () => {
+    const diff = `diff --git a/README.md b/README.md
+index aaa..bbb 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ # Project
++More info
+Submodule packages/ui contains modified content
+diff --git a/packages/ui/src/App.svelte b/packages/ui/src/App.svelte
+index ccc..ddd 100644
+--- a/packages/ui/src/App.svelte
++++ b/packages/ui/src/App.svelte
+@@ -1 +1,2 @@
+ <h1>Hello</h1>
++<p>World</p>
+`;
+    const files = parseDiffToFiles(diff);
+    expect(files).toHaveLength(2);
+    expect(files[0].newFileName).toBe("README.md");
+    expect(files[1].newFileName).toBe("packages/ui/src/App.svelte");
+  });
+
+  it("handles multiple submodule sections", () => {
+    const diff = `Submodule packages/server contains modified content
+diff --git a/packages/server/src/index.js b/packages/server/src/index.js
+index aaa..bbb 100644
+--- a/packages/server/src/index.js
++++ b/packages/server/src/index.js
+@@ -1 +1,2 @@
+ const app = require("app");
++app.listen(3000);
+Submodule packages/ui contains modified content
+diff --git a/packages/ui/src/main.ts b/packages/ui/src/main.ts
+index ccc..ddd 100644
+--- a/packages/ui/src/main.ts
++++ b/packages/ui/src/main.ts
+@@ -1 +1,2 @@
+ import App from "./App";
++new App();
+`;
+    const files = parseDiffToFiles(diff);
+    expect(files).toHaveLength(2);
+    expect(files[0].newFileName).toBe("packages/server/src/index.js");
+    expect(files[1].newFileName).toBe("packages/ui/src/main.ts");
+  });
+
+  it("strips 'contains untracked content' header lines too", () => {
+    const diff = `Submodule packages/server contains untracked content
+diff --git a/packages/server/new-file.js b/packages/server/new-file.js
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/packages/server/new-file.js
+@@ -0,0 +1 @@
++module.exports = {};
+`;
+    const files = parseDiffToFiles(diff);
+    expect(files).toHaveLength(1);
+    expect(files[0].newFileName).toBe("packages/server/new-file.js");
+  });
+});
+
+// ─── buildStatSummary ─────────────────────────────────────────────────────
+
+describe("buildStatSummary", () => {
+  it("returns empty string for no files", () => {
+    expect(buildStatSummary([])).toBe("");
+  });
+
+  it("counts insertions and deletions from hunks", () => {
+    const files = [
+      {
+        oldFileName: "a.js", newFileName: "a.js", fileLang: "javascript",
+        hunks: ["diff --git a/a.js b/a.js\n--- a/a.js\n+++ b/a.js\n@@ -1,2 +1,3 @@\n const x = 1;\n+const y = 2;\n const z = 3;\n"],
+        hunkCount: 1,
+      },
+    ];
+    const stat = buildStatSummary(files);
+    expect(stat).toContain("1 file changed");
+    expect(stat).toContain("1 insertion");
+    expect(stat).toContain("0 deletions");
+  });
+
+  it("sums across multiple files", () => {
+    const files = [
+      {
+        oldFileName: "a.js", newFileName: "a.js", fileLang: "javascript",
+        hunks: ["diff --git a/a.js b/a.js\n--- a/a.js\n+++ b/a.js\n@@ -1 +1 @@\n-old\n+new\n"],
+        hunkCount: 1,
+      },
+      {
+        oldFileName: "b.js", newFileName: "b.js", fileLang: "javascript",
+        hunks: ["diff --git a/b.js b/b.js\n--- a/b.js\n+++ b/b.js\n@@ -1,2 +1,4 @@\n line1\n+added1\n+added2\n line2\n"],
+        hunkCount: 1,
+      },
+    ];
+    const stat = buildStatSummary(files);
+    expect(stat).toContain("2 files changed");
+    expect(stat).toContain("3 insertions");
+    expect(stat).toContain("1 deletion(-)");
+  });
+
+  it("produces a format the UI can regex-parse", () => {
+    const files = [
+      {
+        oldFileName: "x.ts", newFileName: "x.ts", fileLang: "typescript",
+        hunks: ["diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1,3 +1,5 @@\n a\n+b\n+c\n-d\n e\n"],
+        hunkCount: 1,
+      },
+    ];
+    const stat = buildStatSummary(files);
+    const lastLine = stat.trim().split("\n").pop();
+    expect(lastLine).toMatch(/(\d+) insertion/);
+    expect(lastLine).toMatch(/(\d+) deletion/);
   });
 });

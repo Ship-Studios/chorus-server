@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "bun --watch src/index.js",
-    "build": "echo 'No build step needed'"
+    "build": "echo 'No build step needed'",
+    "eval:diff-summary": "bun run src/evals/diff-summary.eval.js"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

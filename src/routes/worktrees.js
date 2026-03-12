@@ -11,7 +11,7 @@ import {
   deleteWorktreeRow,
   lookupSessionId,
 } from "../db.js";
-import { parseDiffToFiles } from "../diff.js";
+import { parseDiffToFiles, buildStatSummary } from "../diff.js";
 import { runGit } from "../run-git.js";
 import { deleteBranch, detectConflicts, removeWorktree } from "../prompt.js";
 
@@ -79,9 +79,9 @@ export default async function worktreeRoutes(fastify) {
 
     try {
       const range = `${wt.base_branch}...${wt.branch_name}`;
-      const diff = await runGit(dir, ["diff", "--no-color", "--unified=5", range]);
-      const stat = await runGit(dir, ["diff", "--stat", "--no-color", range]);
-      return { worktreeId: wt.id, branchName: wt.branch_name, baseBranch: wt.base_branch, stat: stat.trim(), diff, files: parseDiffToFiles(diff) };
+      const diff = await runGit(dir, ["diff", "--no-color", "--unified=5", "--submodule=diff", range]);
+      const files = parseDiffToFiles(diff);
+      return { worktreeId: wt.id, branchName: wt.branch_name, baseBranch: wt.base_branch, stat: buildStatSummary(files), diff, files };
     } catch (err) {
       return reply.code(500).send({ error: `Git error: ${err.message}` });
     }

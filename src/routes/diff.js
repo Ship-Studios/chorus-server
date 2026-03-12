@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { getSession, lookupSessionId } from "../db.js";
-import { parseDiffToFiles } from "../diff.js";
+import { parseDiffToFiles, buildStatSummary } from "../diff.js";
 import { runGit } from "../run-git.js";
 
 export default async function diffRoutes(fastify) {
@@ -19,30 +19,30 @@ export default async function diffRoutes(fastify) {
     }
 
     try {
-      const diff = await runGit(dir, ["diff", "HEAD", "--no-color", "--unified=5"]);
-      const stat = await runGit(dir, ["diff", "HEAD", "--stat", "--no-color"]);
+      const diff = await runGit(dir, ["diff", "HEAD", "--no-color", "--unified=5", "--submodule=diff"]);
       const branch = await runGit(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+      const files = parseDiffToFiles(diff);
 
       return {
         sessionId: req.params.sessionId,
         directory: dir,
         branch: branch.trim(),
-        stat: stat.trim(),
+        stat: buildStatSummary(files),
         diff,
-        files: parseDiffToFiles(diff),
+        files,
       };
     } catch {
       // Fallback: repos with no commits yet
       try {
-        const diff = await runGit(dir, ["diff", "--no-color", "--unified=5"]);
-        const stat = await runGit(dir, ["diff", "--stat", "--no-color"]);
+        const diff = await runGit(dir, ["diff", "--no-color", "--unified=5", "--submodule=diff"]);
+        const files = parseDiffToFiles(diff);
         return {
           sessionId: req.params.sessionId,
           directory: dir,
           branch: "unknown",
-          stat: stat.trim(),
+          stat: buildStatSummary(files),
           diff,
-          files: parseDiffToFiles(diff),
+          files,
         };
       } catch (fallbackErr) {
         return reply.code(500).send({ error: `Git error: ${fallbackErr.message}` });

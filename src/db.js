@@ -374,10 +374,21 @@ export function resolveSessionId(claudeSessionId, projectDir) {
     }
   }
 
-  // 5. New session — alias to itself
+  // 5. New session — alias to itself AND create the session row atomically.
+  // Creating the row here (not just the alias) prevents a race condition where
+  // concurrent requests each see no active session in step 2 and each create
+  // their own. With the row present immediately, subsequent requests find it.
   insertAlias.run({
     $claudeSessionId: claudeSessionId,
     $dashboardSessionId: claudeSessionId,
+  });
+  upsertSession.run({
+    $id: claudeSessionId,
+    $projectDir: projectDir || "unknown",
+    $worktreeDir: null,
+    $status: "active",
+    $model: null,
+    $currentClaudeSessionId: claudeSessionId,
   });
   return claudeSessionId;
 }

@@ -5,6 +5,9 @@
 export function parseDiffToFiles(rawDiff) {
   if (!rawDiff || !rawDiff.trim()) return [];
 
+  // Strip submodule header lines injected by --submodule=diff
+  rawDiff = rawDiff.replace(/^Submodule \S+ contains (?:modified|untracked) content\n/gm, "");
+
   const fileChunks = rawDiff.split(/^(?=diff --git )/m).filter(Boolean);
 
   return fileChunks.map((chunk) => {
@@ -55,4 +58,30 @@ export function parseDiffToFiles(rawDiff) {
       hunkCount,
     };
   });
+}
+
+/**
+ * Builds a git-stat-style summary string from parsed diff files.
+ * The UI extracts totals via /(\d+) insertion/ and /(\d+) deletion/ regexes.
+ */
+export function buildStatSummary(files) {
+  if (!files.length) return "";
+
+  let totalIns = 0;
+  let totalDel = 0;
+  const lines = [];
+
+  for (const f of files) {
+    const chunk = f.hunks[0] || "";
+    const ins = (chunk.match(/^\+([^+]|$)/gm) || []).length;
+    const del = (chunk.match(/^-([^-]|$)/gm) || []).length;
+    totalIns += ins;
+    totalDel += del;
+    const name = f.newFileName || f.oldFileName;
+    lines.push(` ${name} | ${ins + del}`);
+  }
+
+  const fc = files.length;
+  lines.push(` ${fc} file${fc !== 1 ? "s" : ""} changed, ${totalIns} insertion${totalIns !== 1 ? "s" : ""}(+), ${totalDel} deletion${totalDel !== 1 ? "s" : ""}(-)`);
+  return lines.join("\n");
 }
