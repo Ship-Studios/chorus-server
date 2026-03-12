@@ -49,12 +49,16 @@ Claude Code hooks (bash/jq)
 Source files:
 
 - `src/index.js` -- Fastify app, route registration, WebSocket setup, static file serving
-- `src/db.js` -- SQLite schema, prepared statements, session alias resolution
+- `src/db.js` -- SQLite schema (7 tables), prepared statements, cascading deletion
+- `src/session-resolver.js` -- Session alias resolution (5-step chain) with git root caching
 - `src/broadcast.js` -- WebSocket client tracking and broadcast utility
 - `src/git.js` -- Git binary resolution with VPN fallback paths
 - `src/run-git.js` -- Promise-based git spawning with timeout and buffer limits
 - `src/diff.js` -- Unified diff parsing for `@git-diff-view/svelte`
-- `src/prompt.js` -- Claude CLI subprocess management for prompts and swarm agents with worktree isolation
+- `src/stream-parser.js` -- Line-buffered JSON stream parser for Claude CLI output
+- `src/prompt.js` -- Claude CLI subprocess management for prompt submission
+- `src/swarm-manager.js` -- Swarm agent lifecycle (spawn, cancel, worktree isolation, auto-commit)
+- `src/git-worktree.js` -- Git worktree operations (create, remove, diff stats, conflict detection)
 - `src/summarize-diff.js` -- AI diff summarization via `@anthropic-ai/sdk`
 - `src/architecture.js` -- Project source file scanner for architecture visualization
 
