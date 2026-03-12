@@ -378,9 +378,10 @@ Connect to `ws://localhost:3001/ws`. All messages are JSON with a `type` field.
 | `prompt:start` | `{ sessionId, prompt }` | Prompt submitted |
 | `prompt:chunk` | `{ sessionId, chunk }` | Streaming output chunk |
 | `prompt:done` | `{ sessionId, exitCode, cancelled?, error? }` | Prompt completed or cancelled |
-| `swarm:spawned` | `{ agentId, parentSessionId, description, startedAt }` | Swarm agent launched |
+| `swarm:spawned` | `{ agentId, parentSessionId, description, startedAt, worktree? }` | Swarm agent launched |
 | `swarm:chunk` | `{ agentId, parentSessionId, chunk }` | Swarm agent output |
 | `swarm:done` | `{ agentId, exitCode, cancelled?, description }` | Swarm agent exited |
+| `swarm:session-linked` | `{ agentId, parentSessionId, dashboardSessionId, claudeSessionId }` | Swarm agent session created |
 | `worktree:ready` | `{ worktree, parentSessionId }` | Worktree branch ready for review |
 | `worktree:updated` | `{ worktree, parentSessionId }` | Worktree record updated |
 | `worktree:removed` | `{ worktreeId, parentSessionId }` | Worktree discarded |

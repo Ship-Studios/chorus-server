@@ -52,7 +52,7 @@ Each file exports a default async Fastify plugin function. Registered in `index.
 | `worktrees.js` | `/api/worktrees/:id` | Diff, file list, merge (`git merge --no-ff`), discard, conflict check. Merge uses `setImmediate` to reply before running git (avoids `bun --watch` restart). |
 | `diff-summary.js` | `/api/sessions/:id/diff/summary` | AI-generated diff summary. SHA-256 cache (60s TTL). Requires `ANTHROPIC_API_KEY`. |
 | `architecture.js` | `/api/sessions/:id/architecture` | Returns scanned project tree + import flows. |
-| `crafting.js` | `/api/craft/*` | CRUD for agent crafting workbench (agents + recipes). Uses `craft_agents` and `craft_recipes` tables. |
+| `crafting.js` | `/api/craft/*` | CRUD for agent crafting workbench (agents + recipes). AI synthesis via `POST /api/craft/synthesize`. Status check via `GET /api/craft/ai-status`. Uses `craft_agents` and `craft_recipes` tables. |
 
 ## Testing Approach
 
