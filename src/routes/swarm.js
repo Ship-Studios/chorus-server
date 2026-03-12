@@ -25,52 +25,66 @@ export default async function swarmRoutes(fastify) {
 
     const agentDescription = description || prompt.slice(0, 80);
 
-    const { id: agentId } = await spawnSwarmAgent(
-      { prompt, cwd: baseCwd, description: agentDescription, permissionMode, maxTurns, model, parentSessionId: sessionId, useWorktree: !!useWorktree },
-      (event) => {
-        // When a worktree agent finishes, persist the record to DB
-        if (event.type === "swarm:done" && event.worktree) {
-          const wt = event.worktree;
-          const status = wt.filesChanged > 0 ? "ready" : "empty";
+    let agentId;
+    try {
+      ({ id: agentId } = await spawnSwarmAgent(
+        { prompt, cwd: baseCwd, description: agentDescription, permissionMode, maxTurns, model, parentSessionId: sessionId, useWorktree: !!useWorktree },
+        (event) => {
+          // When a worktree agent finishes, persist the record to DB
+          if (event.type === "swarm:done" && event.worktree) {
+            const wt = event.worktree;
+            const status = wt.filesChanged > 0 ? "ready" : "empty";
 
-          const { id: worktreeDbId } = insertWorktree.get({
-            $sessionId: sessionId,
-            $branchName: wt.branchName,
-            $baseBranch: wt.baseBranch,
-            $description: agentDescription,
-            $agentId: event.agentId,
-            $status: status,
-          });
+            const { id: worktreeDbId } = insertWorktree.get({
+              $sessionId: sessionId,
+              $branchName: wt.branchName,
+              $baseBranch: wt.baseBranch,
+              $description: agentDescription,
+              $agentId: event.agentId,
+              $status: status,
+            });
 
-          updateWorktreeStats.run({
-            $id: worktreeDbId,
-            $filesChanged: wt.filesChanged,
-            $insertions: wt.insertions,
-            $deletions: wt.deletions,
-            $diffStat: wt.diffStat,
-            $status: status,
-          });
+            updateWorktreeStats.run({
+              $id: worktreeDbId,
+              $filesChanged: wt.filesChanged,
+              $insertions: wt.insertions,
+              $deletions: wt.deletions,
+              $diffStat: wt.diffStat,
+              $status: status,
+            });
 
-          if (wt.conflictInfo) {
-            updateWorktreeConflicts.run({ $id: worktreeDbId, $conflictInfo: wt.conflictInfo });
+            if (wt.conflictInfo) {
+              updateWorktreeConflicts.run({ $id: worktreeDbId, $conflictInfo: wt.conflictInfo });
+            }
+
+            const worktreeRow = getWorktree.get({ $id: worktreeDbId });
+            broadcast({ type: "worktree:ready", worktree: worktreeRow, parentSessionId: sessionId });
+
+            // Strip redundant worktree stats from swarm:done — the worktree:ready message
+            // already carries the full record; clients don't need the raw stats twice.
+            const { worktree: _discard, ...eventWithoutWorktree } = event;
+            broadcast({ ...eventWithoutWorktree, parentSessionId: sessionId });
+            return; // Don't fall through to the generic broadcast
           }
 
-          const worktreeRow = getWorktree.get({ $id: worktreeDbId });
-          broadcast({ type: "worktree:ready", worktree: worktreeRow, parentSessionId: sessionId });
-        }
-
-        broadcast({ ...event, parentSessionId: sessionId });
-      },
-    );
+          broadcast({ ...event, parentSessionId: sessionId });
+        },
+      ));
+    } catch (err) {
+      if (err.message.startsWith("Maximum concurrent swarm agents")) {
+        return reply.code(429).send({ error: err.message });
+      }
+      throw err;
+    }
 
     broadcast({ type: "swarm:spawned", agentId, parentSessionId: sessionId, description: agentDescription, startedAt: Date.now(), worktree: !!useWorktree });
     return { ok: true, agentId };
   });
 
   fastify.post("/api/swarm/:agentId/cancel", async (req) => {
-    const cancelled = cancelSwarmAgent(req.params.agentId);
+    const { cancelled, sessionId: parentSessionId } = cancelSwarmAgent(req.params.agentId);
     if (cancelled) {
-      broadcast({ type: "swarm:done", agentId: req.params.agentId, exitCode: null, cancelled: true });
+      broadcast({ type: "swarm:done", agentId: req.params.agentId, parentSessionId, exitCode: null, cancelled: true });
     }
     return { ok: true, cancelled };
   });

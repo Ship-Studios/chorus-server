@@ -56,12 +56,12 @@ describe("getPromptSessionId", () => {
 });
 
 describe("cancelSwarmAgent", () => {
-  it("returns false for non-existent agent", () => {
-    expect(cancelSwarmAgent("nonexistent-agent")).toBe(false);
+  it("returns { cancelled: false } for non-existent agent", () => {
+    expect(cancelSwarmAgent("nonexistent-agent")).toEqual({ cancelled: false, sessionId: null });
   });
 
-  it("returns false for empty id", () => {
-    expect(cancelSwarmAgent("")).toBe(false);
+  it("returns { cancelled: false } for empty id", () => {
+    expect(cancelSwarmAgent("")).toEqual({ cancelled: false, sessionId: null });
   });
 });
 

@@ -2,9 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { getSession, lookupSessionId } from "../db.js";
-import { runGit } from "../run-git.js";
-import { buildStatSummary, parseDiffToFiles } from "../diff.js";
-import { summarizeDiff } from "../summarize-diff.js";
+import { runGit, buildStatSummary, parseDiffToFiles, summarizeDiff } from "@agent-dashboard/diff-panel/server";
 
 // ── In-memory cache keyed on SHA-256 of diff content ────────────────────────
 const cache = new Map(); // Map<hash, { summary, model, timestamp }>

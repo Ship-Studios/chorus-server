@@ -231,6 +231,9 @@ export const getSessionWorktrees = db.prepare(`
   SELECT * FROM worktrees WHERE session_id = $sessionId ORDER BY created_at DESC
 `);
 
+export const getRecentAgents = db.prepare(`SELECT * FROM agents ORDER BY created_at DESC LIMIT 500`);
+export const getAllActiveWorktrees = db.prepare(`SELECT * FROM worktrees WHERE status IN ('pending', 'ready') ORDER BY created_at DESC`);
+
 export const deleteWorktreeRow = db.prepare(`
   DELETE FROM worktrees WHERE id = $id
 `);

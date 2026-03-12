@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { wsClients, broadcast } from "./broadcast.js";
-import { getAllSessions, getRecentEvents } from "./db.js";
+import { getAllSessions, getRecentEvents, getRecentAgents, getAllActiveWorktrees } from "./db.js";
 import sessionRoutes from "./routes/sessions.js";
 import eventRoutes from "./routes/events.js";
 import diffRoutes from "./routes/diff.js";
@@ -30,11 +30,22 @@ app.register(async (fastify) => {
     wsClients.add(socket);
     console.log(`Dashboard client connected (${wsClients.size} total)`);
 
-    socket.send(JSON.stringify({
-      type: "init",
-      sessions: getAllSessions.all(),
-      recentEvents: getRecentEvents.all(),
-    }));
+    try {
+      socket.send(JSON.stringify({
+        type: "init",
+        sessions: getAllSessions.all(),
+        recentEvents: getRecentEvents.all(),
+        agents: getRecentAgents.all(),
+        worktrees: getAllActiveWorktrees.all(),
+      }));
+    } catch (err) {
+      console.error("[ws] failed to send init:", err.message);
+    }
+
+    socket.on("error", (err) => {
+      console.error("[ws] client error:", err.message);
+      wsClients.delete(socket);
+    });
 
     socket.on("close", () => {
       wsClients.delete(socket);

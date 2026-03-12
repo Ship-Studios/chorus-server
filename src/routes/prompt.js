@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { broadcast } from "../broadcast.js";
@@ -51,7 +51,13 @@ export default async function promptRoutes(fastify) {
       sessionId,
       { prompt: finalPrompt, cwd, claudeSessionId, permissionMode },
       (chunk) => broadcast({ type: "prompt:chunk", sessionId, chunk }),
-      (result) => broadcast({ type: "prompt:done", sessionId, exitCode: result.code, error: result.error }),
+      (result) => {
+        broadcast({ type: "prompt:done", sessionId, exitCode: result.code, error: result.error });
+        // Clean up the temp screenshot file once the prompt is done
+        if (imagePath) {
+          unlink(imagePath).catch(() => {});
+        }
+      },
     );
 
     return { ok: true, sessionId };

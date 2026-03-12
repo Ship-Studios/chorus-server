@@ -108,14 +108,18 @@ describe("GET /api/sessions/:id/architecture", () => {
     const body = res.json();
     expect(body.sessionId).toBe("arch-session");
     expect(body.projectDir).toBe(PROJECT_ROOT);
-    // getArchitecture returns tree + edges
+    // getArchitecture returns tree + flows
     expect(body).toHaveProperty("tree");
-    expect(body).toHaveProperty("edges");
+    expect(body).toHaveProperty("flows");
   });
 
-  it("returns 500 when architecture scan fails", async () => {
+  it("returns 200 with empty tree for nonexistent project dir", async () => {
+    // getArchitecture swallows filesystem errors internally and returns
+    // an empty tree + flows array rather than throwing
     const res = await app.inject({ method: "GET", url: "/api/sessions/bad-dir-session/architecture" });
-    expect(res.statusCode).toBe(500);
-    expect(res.json().error).toContain("Failed to scan");
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toHaveProperty("tree");
+    expect(body).toHaveProperty("flows");
   });
 });

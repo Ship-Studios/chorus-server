@@ -9,6 +9,7 @@
     "eval:diff-summary": "bun run src/evals/diff-summary.eval.js"
   },
   "dependencies": {
+    "@agent-dashboard/diff-panel": "workspace:*",
     "@fastify/cors": "^11.2.0",
     "@fastify/static": "^9.0.0",
     "@fastify/websocket": "^11.2.0",

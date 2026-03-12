@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import { getSession, lookupSessionId } from "../db.js";
-import { parseDiffToFiles, buildStatSummary } from "../diff.js";
-import { runGit } from "../run-git.js";
+import { parseDiffToFiles, buildStatSummary, runGit } from "@agent-dashboard/diff-panel/server";
 
 export default async function diffRoutes(fastify) {
   fastify.get("/api/sessions/:sessionId/diff", async (req, reply) => {
