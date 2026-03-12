@@ -1,0 +1,17 @@
+{
+  "name": "@agent-dashboard/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.js",
+    "build": "echo 'No build step needed'"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "@fastify/static": "^9.0.0",
+    "@fastify/websocket": "^11.2.0",
+    "chokidar": "^4.0.3",
+    "fastify": "^5.3.3"
+  }
+}
