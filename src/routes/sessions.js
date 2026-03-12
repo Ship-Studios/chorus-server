@@ -9,7 +9,7 @@ import {
   deleteSession,
   insertAlias,
 } from "../db.js";
-import { isPromptActive, cancelPrompt, getActiveSwarmAgents } from "../prompt.js";
+import { isPromptActive, cancelPrompt, getActiveSwarmAgents, hasActiveSwarmAgents } from "../prompt.js";
 
 export default async function sessionRoutes(fastify) {
   fastify.post("/api/sessions", async (req, reply) => {
@@ -99,11 +99,18 @@ export default async function sessionRoutes(fastify) {
 
   fastify.delete("/api/sessions/:sessionId", async (req, reply) => {
     const sessionId = lookupSessionId(req.params.sessionId);
+    const session = getSession.get({ $id: sessionId });
+    if (!session || session.status === "active") {
+      return reply.code(400).send({ error: "Session not found or still active" });
+    }
+    if (hasActiveSwarmAgents(sessionId)) {
+      return reply.code(400).send({ error: "Session has active swarm agents" });
+    }
     // Cancel any active prompt subprocess before deletion
     cancelPrompt(sessionId);
     const deleted = deleteSession(sessionId);
     if (!deleted) {
-      return reply.code(400).send({ error: "Session not found" });
+      return reply.code(400).send({ error: "Session not found or still active" });
     }
 
     broadcast({ type: "session:deleted", sessionId });

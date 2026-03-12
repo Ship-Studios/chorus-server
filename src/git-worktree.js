@@ -51,7 +51,7 @@ export function createWorktree(repoDir, id, description) {
   const branchName = `agent/${slug}-${id.slice(0, 6)}`;
   const worktreePath = join(repoDir, "..", `.swarm-worktree-${id}`);
 
-  execFileSync(GIT, ["worktree", "add", "-b", branchName, worktreePath], {
+  execFileSync(GIT, ["worktree", "add", "-b", branchName, worktreePath, baseBranch], {
     cwd: repoDir,
     stdio: "pipe",
     timeout: 15000,

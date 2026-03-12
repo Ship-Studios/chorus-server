@@ -256,3 +256,12 @@ export function getActiveSwarmAgents(sessionId) {
   }
   return results;
 }
+
+export function hasActiveSwarmAgents(sessionId) {
+  for (const agent of activeSwarmAgents.values()) {
+    if (!sessionId || agent.sessionId === sessionId) {
+      return true;
+    }
+  }
+  return false;
+}

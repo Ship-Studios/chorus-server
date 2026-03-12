@@ -14,6 +14,7 @@ import { runGit } from "./run-git.js";
  */
 
 const TEMP_REPO = join(import.meta.dir, "..", ".test-diff-repo");
+const TEMP_WORKTREE = join(import.meta.dir, "..", ".test-diff-worktree");
 let app;
 let db;
 let getSession;
@@ -78,6 +79,8 @@ beforeAll(async () => {
 
   // Create an unstaged change for diff to pick up
   writeFileSync(join(TEMP_REPO, "hello.js"), "const x = 1;\nconst y = 2;\n");
+  git(["worktree", "add", "-b", "feature/worktree", TEMP_WORKTREE]);
+  writeFileSync(join(TEMP_WORKTREE, "hello.js"), "const x = 1;\nconst worktree = true;\n");
 
   // Set up DB and Fastify
   const { upsertSession } = initDb();
@@ -103,6 +106,13 @@ beforeAll(async () => {
     $status: "active",
   });
 
+  upsertSession.run({
+    $id: "worktree-session",
+    $projectDir: TEMP_REPO,
+    $worktreeDir: TEMP_WORKTREE,
+    $status: "active",
+  });
+
   app = Fastify();
 
   // Register the diff route with our test DB
@@ -111,7 +121,7 @@ beforeAll(async () => {
     const session = getSession.get({ $id: sessionId });
     if (!session) return reply.code(404).send({ error: "Session not found" });
 
-    const dir = session.project_dir;
+    const dir = session.worktree_dir || session.project_dir;
     if (!dir || dir === "unknown") {
       return reply.code(400).send({ error: "Session has no known working directory" });
     }
@@ -157,7 +167,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
+  execFileSync(GIT, ["worktree", "remove", "--force", TEMP_WORKTREE], {
+    cwd: TEMP_REPO,
+    stdio: "pipe",
+  });
   rmSync(TEMP_REPO, { recursive: true, force: true });
+  rmSync(TEMP_WORKTREE, { recursive: true, force: true });
 });
 
 describe("GET /api/sessions/:sessionId/diff", () => {
@@ -219,5 +234,15 @@ describe("GET /api/sessions/:sessionId/diff", () => {
       expect(body.files[0]).toHaveProperty("hunkCount");
       expect(body.files[0]).toHaveProperty("hunks");
     }
+  });
+
+  it("prefers worktree_dir over project_dir when present", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/sessions/worktree-session/diff" });
+    expect(res.statusCode).toBe(200);
+
+    const body = res.json();
+    expect(body.directory).toBe(TEMP_WORKTREE);
+    expect(body.diff).toContain("const worktree = true");
+    expect(body.diff).not.toContain("const y = 2");
   });
 });

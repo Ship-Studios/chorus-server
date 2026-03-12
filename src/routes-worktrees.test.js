@@ -21,6 +21,7 @@ const TEMP_REPO = join(import.meta.dir, "..", ".test-worktree-repo");
 let app;
 let db;
 let stmts;
+let tempLinkedWorktree;
 
 function git(args, opts = {}) {
   return execFileSync(GIT, args, {
@@ -192,6 +193,53 @@ function registerRoutes(fastify, s) {
     const updated = s.getWorktree.get({ $id: wt.id });
     return { ok: true, conflicts: !!conflictInfo, conflictInfo };
   });
+
+  fastify.delete("/api/worktrees/:worktreeId", async (req, reply) => {
+    const wt = s.getWorktree.get({ $id: Number(req.params.worktreeId) });
+    if (!wt) return reply.code(404).send({ error: "Worktree not found" });
+
+    const session = s.getSession.get({ $id: wt.session_id });
+    if (session) {
+      const dir = session.project_dir;
+      const { existsSync } = await import("node:fs");
+      if (dir && existsSync(dir)) {
+        try {
+          const out = await runGit(dir, ["worktree", "list", "--porcelain"]);
+          let currentPath = null;
+          let currentBranch = null;
+          for (const line of out.split("\n")) {
+            if (line.startsWith("worktree ")) {
+              currentPath = line.slice(9).trim();
+              currentBranch = null;
+            } else if (line.startsWith("branch refs/heads/")) {
+              currentBranch = line.slice("branch refs/heads/".length).trim();
+            } else if (line === "") {
+              if (currentBranch === wt.branch_name && currentPath && existsSync(currentPath)) {
+                execFileSync(GIT, ["worktree", "remove", "--force", currentPath], {
+                  cwd: dir,
+                  stdio: "pipe",
+                  timeout: 15000,
+                });
+              }
+              currentPath = null;
+              currentBranch = null;
+            }
+          }
+        } catch {}
+
+        if (wt.status !== "merged") {
+          execFileSync(GIT, ["branch", "-D", wt.branch_name], {
+            cwd: dir,
+            stdio: "pipe",
+            timeout: 5000,
+          });
+        }
+      }
+    }
+
+    s.deleteWorktreeRow.run({ $id: wt.id });
+    return { ok: true };
+  });
 }
 
 beforeAll(async () => {
@@ -209,6 +257,8 @@ beforeAll(async () => {
   git(["add", "."]);
   git(["commit", "-m", "add feature"]);
   git(["checkout", "main"]);
+  tempLinkedWorktree = join(import.meta.dir, "..", ".test-linked-worktree");
+  git(["worktree", "add", tempLinkedWorktree, "agent/feature-abc123"]);
 
   // Set up DB and routes
   stmts = initDb();
@@ -237,7 +287,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
+  try {
+    git(["worktree", "remove", "--force", tempLinkedWorktree]);
+  } catch {}
   rmSync(TEMP_REPO, { recursive: true, force: true });
+  rmSync(tempLinkedWorktree, { recursive: true, force: true });
 });
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -367,5 +421,34 @@ describe("POST /api/worktrees/:worktreeId/check-conflicts", () => {
     // Verify stored in DB
     const stored = stmts.getWorktree.get({ $id: conflictWtId });
     expect(stored.conflict_info).toBeTruthy();
+  });
+});
+
+describe("DELETE /api/worktrees/:worktreeId", () => {
+  it("removes the linked worktree before deleting the branch", async () => {
+    const { id } = stmts.insertWorktree.get({
+      $sessionId: "wt-session",
+      $branchName: "agent/delete-me",
+      $baseBranch: "main",
+      $description: "delete me",
+      $agentId: null,
+      $status: "ready",
+    });
+
+    git(["branch", "agent/delete-me", "main"]);
+    const linkedPath = join(import.meta.dir, "..", ".test-delete-worktree");
+    git(["worktree", "add", linkedPath, "agent/delete-me"]);
+
+    try {
+      const res = await app.inject({ method: "DELETE", url: `/api/worktrees/${id}` });
+      expect(res.statusCode).toBe(200);
+      expect(stmts.getWorktree.get({ $id: id })).toBeNull();
+
+      const worktreeList = git(["worktree", "list", "--porcelain"]);
+      expect(worktreeList).not.toContain(linkedPath);
+      expect(() => git(["rev-parse", "--verify", "agent/delete-me"])).toThrow();
+    } finally {
+      rmSync(linkedPath, { recursive: true, force: true });
+    }
   });
 });

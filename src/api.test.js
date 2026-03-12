@@ -961,6 +961,7 @@ describe("API integration tests", () => {
         url: "/api/sessions/does-not-exist-xyz",
       });
       expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("Session not found or still active");
     });
 
     it("cascading delete removes agents too", async () => {

@@ -8,7 +8,7 @@ export default async function diffRoutes(fastify) {
     const session = getSession.get({ $id: sessionId });
     if (!session) return reply.code(404).send({ error: "Session not found" });
 
-    const dir = session.project_dir;
+    const dir = session.worktree_dir || session.project_dir;
     if (!dir || dir === "unknown") {
       return reply.code(400).send({ error: "Session has no known working directory" });
     }

@@ -154,7 +154,7 @@ export default async function worktreeRoutes(fastify) {
               currentBranch = line.slice("branch refs/heads/".length).trim();
             } else if (line === "") {
               if (currentBranch === wt.branch_name && currentPath && existsSync(currentPath)) {
-                removeWorktree(dir, currentPath);
+                await removeWorktree(dir, currentPath);
               }
               currentPath = null;
               currentBranch = null;

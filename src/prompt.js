@@ -186,4 +186,4 @@ export function getPromptSessionId(dashboardSessionId) {
 export { deleteBranch, getBranchDiffStats, detectConflicts, removeWorktree, getCurrentBranch } from "./git-worktree.js";
 
 // Re-export swarm functions for backward compatibility
-export { spawnSwarmAgent, cancelSwarmAgent, getActiveSwarmAgents } from "./swarm-manager.js";
+export { spawnSwarmAgent, cancelSwarmAgent, getActiveSwarmAgents, hasActiveSwarmAgents } from "./swarm-manager.js";

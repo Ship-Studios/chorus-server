@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
  */
 
 const TEMP_REPO = join(import.meta.dir, "..", ".test-diff-summary-repo");
+const TEMP_WORKTREE = join(import.meta.dir, "..", ".test-diff-summary-worktree");
 let app;
 let db;
 let getSession;
@@ -84,6 +85,8 @@ beforeAll(async () => {
 
   // Create an unstaged change
   writeFileSync(join(TEMP_REPO, "hello.js"), "const x = 1;\nconst y = 2;\n");
+  git(["worktree", "add", "-b", "feature/worktree", TEMP_WORKTREE]);
+  writeFileSync(join(TEMP_WORKTREE, "hello.js"), "const x = 1;\nconst worktree = true;\n");
 
   const { upsertSession } = initDb();
 
@@ -105,6 +108,13 @@ beforeAll(async () => {
     $id: "missing-dir-session",
     $projectDir: "/tmp/does-not-exist-diff-summary-99999",
     $worktreeDir: null,
+    $status: "active",
+  });
+
+  upsertSession.run({
+    $id: "worktree-summary-session",
+    $projectDir: TEMP_REPO,
+    $worktreeDir: TEMP_WORKTREE,
     $status: "active",
   });
 
@@ -130,7 +140,7 @@ beforeAll(async () => {
     const session = getSession.get({ $id: sessionId });
     if (!session) return reply.code(404).send({ error: "Session not found" });
 
-    const dir = session.project_dir;
+    const dir = session.worktree_dir || session.project_dir;
     if (!dir || dir === "unknown") {
       return reply.code(400).send({ error: "Session has no known working directory" });
     }
@@ -200,7 +210,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
+  execFileSync(GIT, ["worktree", "remove", "--force", TEMP_WORKTREE], {
+    cwd: TEMP_REPO,
+    stdio: "pipe",
+  });
   rmSync(TEMP_REPO, { recursive: true, force: true });
+  rmSync(TEMP_WORKTREE, { recursive: true, force: true });
 });
 
 beforeEach(() => {
@@ -433,6 +448,25 @@ describe("POST /api/sessions/:id/diff/summary", () => {
       expect(mockCreateCalls).toHaveLength(1);
       expect(mockCreateCalls[0].diff).toContain("const y = 2");
       expect(mockCreateCalls[0].stat).toContain("hello.js");
+    } finally {
+      if (origKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = origKey;
+    }
+  });
+
+  it("prefers worktree_dir over project_dir when present", async () => {
+    const origKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "test-key";
+    mockAnthropicResponse = "• Test";
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/sessions/worktree-summary-session/diff/summary",
+      });
+      expect(res.statusCode).toBe(200);
+      expect(mockCreateCalls).toHaveLength(1);
+      expect(mockCreateCalls[0].diff).toContain("const worktree = true");
+      expect(mockCreateCalls[0].diff).not.toContain("const y = 2");
     } finally {
       if (origKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = origKey;
