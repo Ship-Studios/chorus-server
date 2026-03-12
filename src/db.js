@@ -37,6 +37,7 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
   CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+  CREATE INDEX IF NOT EXISTS idx_events_session_created ON events(session_id, created_at DESC);
 
   -- Maps Claude Code CLI session_ids to canonical dashboard session IDs.
   -- Multiple CLI invocations (reconnects) for the same conversation resolve

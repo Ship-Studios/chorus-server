@@ -1194,4 +1194,278 @@ describe("API integration tests", () => {
       expect(session.model).toBe("new-model");
     });
   });
+
+  // ─── Alias resolution via event endpoint ──────────────────────────
+
+  describe("Event-triggered alias resolution", () => {
+    it("event for same project_dir aliases to existing session", async () => {
+      // Create initial session
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "ev-alias-orig", projectDir: "/ev-alias" },
+      });
+
+      // Post event from a different CLI session ID but same dir
+      await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: { sessionId: "ev-alias-new", projectDir: "/ev-alias", toolName: "Read" },
+      });
+
+      // The event should be under the original session
+      const events = testDb.getSessionEvents.all({ $sessionId: "ev-alias-orig" });
+      expect(events.some((e) => e.tool_name === "Read")).toBe(true);
+
+      // And the alias should exist
+      const alias = testDb.getAlias.get({ $claudeSessionId: "ev-alias-new" });
+      expect(alias.dashboard_session_id).toBe("ev-alias-orig");
+    });
+
+    it("event with unknown dir creates a new session", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: { sessionId: "ev-unknown-dir", toolName: "Bash" },
+      });
+
+      // Should create its own session
+      const session = testDb.getSession.get({ $id: "ev-unknown-dir" });
+      expect(session).toBeTruthy();
+      expect(session.project_dir).toBe("unknown");
+    });
+  });
+
+  // ─── Session reactivation ────────────────────────────────────────
+
+  describe("Session reactivation", () => {
+    it("session can be reactivated after being stopped", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "reactivate", projectDir: "/react" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions/reactivate/stop",
+      });
+
+      const stopped = testDb.getSession.get({ $id: "reactivate" });
+      expect(stopped.status).toBe("stopped");
+
+      // Reactivate via new upsert
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "reactivate", projectDir: "/react" },
+      });
+
+      const reactivated = testDb.getSession.get({ $id: "reactivate" });
+      expect(reactivated.status).toBe("active");
+    });
+  });
+
+  // ─── current_claude_session_id tracking ──────────────────────────
+
+  describe("current_claude_session_id", () => {
+    it("stores the Claude CLI session ID on create", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "cli-id-track", projectDir: "/cliid" },
+      });
+
+      const session = testDb.getSession.get({ $id: "cli-id-track" });
+      expect(session.current_claude_session_id).toBe("cli-id-track");
+    });
+
+    it("preserves existing cli session id when null is passed via COALESCE", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "cli-coalesce", projectDir: "/coal" },
+      });
+
+      // Simulate an upsert that passes null for current_claude_session_id
+      testDb.upsertSession.run({
+        $id: "cli-coalesce",
+        $projectDir: "/coal",
+        $worktreeDir: null,
+        $status: "active",
+        $model: null,
+        $currentClaudeSessionId: null,
+      });
+
+      const session = testDb.getSession.get({ $id: "cli-coalesce" });
+      expect(session.current_claude_session_id).toBe("cli-coalesce");
+    });
+  });
+
+  // ─── Worktree status updates ─────────────────────────────────────
+
+  describe("Worktree status lifecycle", () => {
+    it("updates worktree status from pending to ready", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "wt-status", projectDir: "/wts" },
+      });
+
+      const { id: wtId } = worktreeHelpers.insertWorktree.get({
+        $sessionId: "wt-status",
+        $branchName: "agent/status-test",
+        $baseBranch: "main",
+        $description: "status test",
+        $agentId: null,
+        $status: "pending",
+      });
+
+      worktreeHelpers.updateWorktreeStatus.run({ $id: wtId, $status: "ready" });
+      const wt = worktreeHelpers.getWorktree.get({ $id: wtId });
+      expect(wt.status).toBe("ready");
+    });
+
+    it("updates worktree status to merged", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "wt-merge", projectDir: "/wtm" },
+      });
+
+      const { id: wtId } = worktreeHelpers.insertWorktree.get({
+        $sessionId: "wt-merge",
+        $branchName: "agent/merge-test",
+        $baseBranch: "main",
+        $description: "merge test",
+        $agentId: null,
+        $status: "ready",
+      });
+
+      worktreeHelpers.updateWorktreeStatus.run({ $id: wtId, $status: "merged" });
+      const wt = worktreeHelpers.getWorktree.get({ $id: wtId });
+      expect(wt.status).toBe("merged");
+    });
+  });
+
+  // ─── Multiple events per session ──────────────────────────────────
+
+  describe("Event ordering and limits", () => {
+    it("returns all events for a session", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "order-test", projectDir: "/order" },
+      });
+
+      const tools = ["Read", "Write", "Bash", "Edit", "Glob"];
+      for (const tool of tools) {
+        await app.inject({
+          method: "POST",
+          url: "/api/events",
+          payload: { sessionId: "order-test", toolName: tool, summary: `${tool} op` },
+        });
+      }
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/sessions/order-test/events",
+      });
+      const events = res.json();
+      expect(events.length).toBe(5);
+
+      // All tools should be present
+      const toolNames = events.map((e) => e.tool_name).sort();
+      expect(toolNames).toEqual(["Bash", "Edit", "Glob", "Read", "Write"]);
+    });
+
+    it("GET /api/events returns events with project_dir from join", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "join-test", projectDir: "/joined" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: { sessionId: "join-test", toolName: "Read" },
+      });
+
+      const res = await app.inject({ method: "GET", url: "/api/events" });
+      const events = res.json();
+      const found = events.find((e) => e.session_id === "join-test");
+      expect(found).toBeTruthy();
+      expect(found.project_dir).toBe("/joined");
+    });
+  });
+
+  // ─── Agent with no payload ────────────────────────────────────────
+
+  describe("Agent detection edge cases", () => {
+    it("does not create agent when Agent event has no payload", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "agent-no-payload", projectDir: "/anp" },
+      });
+
+      await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: { sessionId: "agent-no-payload", toolName: "Agent" },
+      });
+
+      const agents = testDb.getSessionAgents.all({ $sessionId: "agent-no-payload" });
+      expect(agents).toHaveLength(0);
+    });
+
+    it("handles Agent with empty input object", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "agent-empty-input", projectDir: "/aei" },
+      });
+
+      await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: {
+          sessionId: "agent-empty-input",
+          toolName: "Agent",
+          payload: { input: {} },
+        },
+      });
+
+      const agents = testDb.getSessionAgents.all({ $sessionId: "agent-empty-input" });
+      expect(agents).toHaveLength(1);
+      expect(agents[0].description).toBe("Sub-agent");
+      expect(agents[0].agent_type).toBe("general-purpose");
+      expect(agents[0].prompt).toBeNull();
+    });
+
+    it("handles multiple agents in the same session", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "multi-agent", projectDir: "/ma" },
+      });
+
+      for (let i = 0; i < 3; i++) {
+        await app.inject({
+          method: "POST",
+          url: "/api/events",
+          payload: {
+            sessionId: "multi-agent",
+            toolName: "Agent",
+            payload: { input: { description: `agent-${i}`, subagent_type: "Explore", prompt: `task ${i}` } },
+          },
+        });
+      }
+
+      const agents = testDb.getSessionAgents.all({ $sessionId: "multi-agent" });
+      expect(agents).toHaveLength(3);
+      // All three agents should exist (order may vary within the same second)
+      const descriptions = agents.map((a) => a.description).sort();
+      expect(descriptions).toEqual(["agent-0", "agent-1", "agent-2"]);
+    });
+  });
 });

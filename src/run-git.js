@@ -7,8 +7,10 @@ const MAX_BUFFER = 10 * 1024 * 1024; // 10 MB
 export function runGit(cwd, args, { timeout = DEFAULT_TIMEOUT } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(GIT, args, { cwd });
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutLen = 0;
+    let stderrLen = 0;
     let killed = false;
 
     const timer = setTimeout(() => {
@@ -18,20 +20,24 @@ export function runGit(cwd, args, { timeout = DEFAULT_TIMEOUT } = {}) {
     }, timeout);
 
     proc.stdout.on("data", (d) => {
-      stdout += d;
-      if (stdout.length > MAX_BUFFER) {
+      stdoutLen += d.length;
+      if (stdoutLen > MAX_BUFFER) {
         killed = true;
         proc.kill("SIGTERM");
         reject(new Error(`git ${args[0]} output exceeded ${MAX_BUFFER} bytes`));
+        return;
       }
+      stdoutChunks.push(d);
     });
     proc.stderr.on("data", (d) => {
-      stderr += d;
-      if (stderr.length > MAX_BUFFER) {
+      stderrLen += d.length;
+      if (stderrLen > MAX_BUFFER) {
         killed = true;
         proc.kill("SIGTERM");
         reject(new Error(`git ${args[0]} stderr exceeded ${MAX_BUFFER} bytes`));
+        return;
       }
+      stderrChunks.push(d);
     });
     proc.on("error", (err) => {
       clearTimeout(timer);
@@ -40,8 +46,9 @@ export function runGit(cwd, args, { timeout = DEFAULT_TIMEOUT } = {}) {
     proc.on("close", (code) => {
       clearTimeout(timer);
       if (killed) return;
+      const stdout = Buffer.concat(stdoutChunks).toString();
       if (code === 0) resolve(stdout);
-      else reject(new Error(stderr || `git exited with code ${code}`));
+      else reject(new Error(Buffer.concat(stderrChunks).toString() || `git exited with code ${code}`));
     });
   });
 }
