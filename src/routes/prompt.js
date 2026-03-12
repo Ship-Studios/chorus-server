@@ -5,8 +5,10 @@ import { broadcast } from "../broadcast.js";
 import { getSession, lookupSessionId } from "../db.js";
 import { sendPrompt, cancelPrompt, isPromptActive } from "../prompt.js";
 
+const PROMPT_BODY_LIMIT = 15 * 1024 * 1024;
+
 export default async function promptRoutes(fastify) {
-  fastify.post("/api/sessions/:sessionId/prompt", async (req, reply) => {
+  fastify.post("/api/sessions/:sessionId/prompt", { bodyLimit: PROMPT_BODY_LIMIT }, async (req, reply) => {
     const { prompt, permissionMode, image } = req.body ?? {};
     if (!prompt) return reply.code(400).send({ error: "prompt is required" });
 

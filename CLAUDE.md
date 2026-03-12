@@ -31,6 +31,7 @@ Fastify 5 server — plain JS (ESM, no build step), `bun:sqlite` for persistence
 - **`run-git.js`** — Promise-based `spawn(GIT, args, { cwd })` with timeout (30s) and buffer limits (10MB).
 - **`diff.js`** — Parses unified diff output into `{ oldFileName, newFileName, fileLang, hunks }` for the `@git-diff-view/svelte` component.
 - **`prompt.js`** — Manages `claude --resume`/`--print` subprocesses. Streams JSON chunks via WebSocket. One active prompt per session (409 on conflict). Also handles swarm agent spawning with worktree isolation.
+- **`summarize-diff.js`** — Core diff summarization via `@anthropic-ai/sdk`. Exports the system/user prompts and `summarizeDiff()` so the same logic is shared between the route handler and the eval suite (`src/evals/`).
 - **`architecture.js`** — Project source file scanner that builds directory trees and import-graph flows for the architecture visualization. 30s in-memory cache per project.
 
 ## Route Modules (`src/routes/`)
@@ -45,11 +46,14 @@ Each file exports a default async Fastify plugin function. Registered in `index.
 | `prompt.js` | `/api/sessions/:id/prompt` | Submit, cancel, status. Image attachment support (base64 → temp file). |
 | `swarm.js` | `/api/sessions/:id/swarm`, `/api/swarm/:agentId` | Spawn independent Claude processes. Worktree isolation via `git worktree add -b`. |
 | `worktrees.js` | `/api/worktrees/:id` | Diff, file list, merge (`git merge --no-ff`), discard, conflict check. Merge uses `setImmediate` to reply before running git (avoids `bun --watch` restart). |
+| `diff-summary.js` | `/api/sessions/:id/diff/summary` | AI-generated diff summary. SHA-256 cache (60s TTL). Requires `ANTHROPIC_API_KEY`. |
 | `architecture.js` | `/api/sessions/:id/architecture` | Returns scanned project tree + import flows. |
 
 ## Testing Approach
 
 Tests use `bun:test` with Fastify's `app.inject()` for HTTP testing (no real server needed). `api.test.js` creates an in-memory SQLite DB and rebuilds the schema + route handlers inline — it does **not** import from `db.js` to avoid touching the real `dashboard.db`. The test's `resolveSessionId` is a simplified version (no git root resolution).
+
+Route-specific tests (`routes-*.test.js`) cover individual route modules. Unit tests exist for core modules (`db.test.js`, `diff.test.js`, `broadcast.test.js`, `git.test.js`, `run-git.test.js`, `summarize-diff.test.js`, `architecture.test.js`).
 
 ## Key Patterns
 
