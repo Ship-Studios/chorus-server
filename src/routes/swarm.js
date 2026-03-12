@@ -82,10 +82,10 @@ export default async function swarmRoutes(fastify) {
   });
 
   fastify.post("/api/swarm/:agentId/cancel", async (req) => {
-    const { cancelled, sessionId: parentSessionId } = cancelSwarmAgent(req.params.agentId);
-    if (cancelled) {
-      broadcast({ type: "swarm:done", agentId: req.params.agentId, parentSessionId, exitCode: null, cancelled: true });
-    }
+    const { cancelled } = cancelSwarmAgent(req.params.agentId);
+    // Do not broadcast swarm:done here — the process close handler in
+    // swarm-manager.js is the single source of truth and will emit it
+    // with cancelled: true once the process actually exits.
     return { ok: true, cancelled };
   });
 

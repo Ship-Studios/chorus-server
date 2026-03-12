@@ -4,17 +4,31 @@ export const wsClients = new Set();
 const MAX_BUFFER = 1 * 1024 * 1024;
 
 export function broadcast(message) {
-  const data = JSON.stringify(message);
+  let data;
+  try {
+    data = JSON.stringify(message);
+  } catch (err) {
+    console.warn("[ws] broadcast skipped — JSON.stringify failed:", err.message);
+    return;
+  }
+  // Set deletion during iteration is safe per the ES spec: deleted entries
+  // that have not yet been visited are simply skipped by the iterator.
   for (const client of wsClients) {
+    if (client.readyState === 3) {
+      wsClients.delete(client);
+      continue;
+    }
     if (client.readyState === 1) {
       if (client.bufferedAmount > MAX_BUFFER) {
+        console.warn("[ws] terminating slow client (buffered:", client.bufferedAmount, "bytes)");
         wsClients.delete(client);
         client.terminate();
         continue;
       }
       try {
         client.send(data);
-      } catch {
+      } catch (err) {
+        console.warn("[ws] removing client after send error:", err.message);
         wsClients.delete(client);
       }
     }

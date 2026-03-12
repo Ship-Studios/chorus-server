@@ -33,8 +33,12 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
   }
 
   const id = randomUUID().slice(0, 12);
-
   const controller = new AbortController();
+
+  // Reserve a slot immediately after the size check to close the concurrency gap.
+  // The placeholder is replaced below once we have the full agent object.
+  // If worktree creation or process spawn fails, we clean up the reservation.
+  activeSwarmAgents.set(id, { id, status: "pending", controller, description, startedAt: Date.now(), sessionId: parentSessionId, baseCwd: cwd });
 
   // If worktree requested, create an isolated copy of the repo with a named branch
   let effectiveCwd = cwd;
@@ -50,6 +54,7 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
       effectiveCwd = worktreePath;
       console.log(`[swarm:${id}] Created worktree at ${worktreePath} on branch ${branchName} (base: ${baseBranch})`);
     } catch (err) {
+      activeSwarmAgents.delete(id);
       console.error(`[swarm:${id}] Failed to create worktree: ${err.message}`);
       throw new Error(`Failed to create git worktree: ${err.message}`);
     }
@@ -85,21 +90,15 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  const agent = {
-    id,
-    controller,
+  // Update the reserved slot with the full agent details now that we have the process.
+  const agent = activeSwarmAgents.get(id);
+  Object.assign(agent, {
     proc,
-    description,
     status: "running",
-    startedAt: Date.now(),
-    sessionId: parentSessionId,
     worktreePath,
     branchName,
     baseBranch,
-    baseCwd: cwd,
-  };
-
-  activeSwarmAgents.set(id, agent);
+  });
 
   const parser = createStreamParser((chunk) => {
     onEvent({ type: "swarm:chunk", agentId: id, chunk });
@@ -179,7 +178,10 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
         description,
         worktree: worktreeStats,
       });
-    })().catch(err => console.error("[swarm] close handler error:", err));
+    })().catch(err => {
+      console.error("[swarm] close handler error:", err);
+      onEvent({ type: "swarm:done", agentId: id, exitCode: code, error: err.message, description });
+    });
   });
 
   proc.on("error", (err) => {

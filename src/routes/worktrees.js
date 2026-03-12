@@ -40,7 +40,7 @@ export default async function worktreeRoutes(fastify) {
               const existing = getWorktreeByBranch.get({ $sessionId: sessionId, $branchName: currentBranch });
               if (!existing) {
                 const description = currentBranch.replace(/^agent\//, "").replace(/-[a-f0-9]{6}$/, "").replace(/-/g, " ");
-                const { id: wid } = insertWorktree.get({
+                insertWorktree.get({
                   $sessionId: sessionId,
                   $branchName: currentBranch,
                   $baseBranch: "main",
@@ -48,8 +48,6 @@ export default async function worktreeRoutes(fastify) {
                   $agentId: null,
                   $status: "pending",
                 });
-                const worktreeRow = getWorktree.get({ $id: wid });
-                broadcast({ type: "worktree:ready", worktree: worktreeRow, parentSessionId: sessionId });
               }
             }
             currentPath = null;

@@ -47,18 +47,23 @@ export default async function promptRoutes(fastify) {
 
     broadcast({ type: "prompt:start", sessionId, prompt: finalPrompt, hasImage: !!imagePath });
 
-    sendPrompt(
-      sessionId,
-      { prompt: finalPrompt, cwd, claudeSessionId, permissionMode },
-      (chunk) => broadcast({ type: "prompt:chunk", sessionId, chunk }),
-      (result) => {
-        broadcast({ type: "prompt:done", sessionId, exitCode: result.code, error: result.error });
-        // Clean up the temp screenshot file once the prompt is done
-        if (imagePath) {
-          unlink(imagePath).catch(() => {});
-        }
-      },
-    );
+    try {
+      sendPrompt(
+        sessionId,
+        { prompt: finalPrompt, cwd, claudeSessionId, permissionMode },
+        (chunk) => broadcast({ type: "prompt:chunk", sessionId, chunk }),
+        (result) => {
+          broadcast({ type: "prompt:done", sessionId, exitCode: result.code, cancelled: result.cancelled, error: result.error });
+          // Clean up the temp screenshot file once the prompt is done
+          if (imagePath) {
+            unlink(imagePath).catch(() => {});
+          }
+        },
+      );
+    } catch (err) {
+      broadcast({ type: "prompt:done", sessionId, exitCode: null, error: err.message });
+      return reply.code(500).send({ error: err.message });
+    }
 
     return { ok: true, sessionId };
   });
@@ -66,9 +71,8 @@ export default async function promptRoutes(fastify) {
   fastify.post("/api/sessions/:sessionId/prompt/cancel", async (req) => {
     const sessionId = lookupSessionId(req.params.sessionId);
     const cancelled = cancelPrompt(sessionId);
-    if (cancelled) {
-      broadcast({ type: "prompt:done", sessionId, exitCode: null, cancelled: true });
-    }
+    // Do not broadcast prompt:done here — the process close/error handlers
+    // are the single source of truth and will emit prompt:done with cancelled: true.
     return { ok: true, cancelled };
   });
 

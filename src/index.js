@@ -24,11 +24,20 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true, methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] });
 await app.register(websocket);
 
+const MAX_WS_CLIENTS = 50;
+
 // WebSocket endpoint — sends current state on connect, tracks clients for broadcast
 app.register(async (fastify) => {
   fastify.get("/ws", { websocket: true }, (socket) => {
+    if (wsClients.size >= MAX_WS_CLIENTS) {
+      socket.close(1013, "Too many connections");
+      return;
+    }
+    socket.isAlive = true;
     wsClients.add(socket);
     console.log(`Dashboard client connected (${wsClients.size} total)`);
+
+    socket.on("pong", () => { socket.isAlive = true; });
 
     try {
       socket.send(JSON.stringify({
@@ -52,6 +61,28 @@ app.register(async (fastify) => {
       console.log(`Dashboard client disconnected (${wsClients.size} total)`);
     });
   });
+});
+
+// Ping/pong heartbeat — detects and removes half-open connections every 30s
+const heartbeatInterval = setInterval(() => {
+  for (const socket of wsClients) {
+    if (!socket.isAlive) {
+      console.warn("[ws] terminating unresponsive client (no pong received)");
+      wsClients.delete(socket);
+      socket.terminate();
+      continue;
+    }
+    socket.isAlive = false;
+    socket.ping();
+  }
+}, 30_000);
+
+app.addHook("onClose", () => {
+  clearInterval(heartbeatInterval);
+  for (const socket of wsClients) {
+    socket.close(1001, "Server shutting down");
+  }
+  wsClients.clear();
 });
 
 // Route plugins

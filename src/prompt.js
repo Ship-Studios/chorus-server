@@ -102,10 +102,13 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
       doneFired = true;
 
       parser.flush();
-      onDone({ code });
       const entry = activePrompts.get(dashboardSessionId);
+      onDone({ code, cancelled: entry?.cancelled ?? false });
       if (entry) entry.done = true;
-      setTimeout(() => activePrompts.delete(dashboardSessionId), 5000);
+      setTimeout(() => {
+        const current = activePrompts.get(dashboardSessionId);
+        if (current?.done) activePrompts.delete(dashboardSessionId);
+      }, 5000);
     });
 
     proc.on("error", (err) => {
@@ -115,7 +118,10 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
       onDone({ code: null, error: err.message });
       const entry = activePrompts.get(dashboardSessionId);
       if (entry) entry.done = true;
-      setTimeout(() => activePrompts.delete(dashboardSessionId), 5000);
+      setTimeout(() => {
+        const current = activePrompts.get(dashboardSessionId);
+        if (current?.done) activePrompts.delete(dashboardSessionId);
+      }, 5000);
     });
   }
 
@@ -143,10 +149,12 @@ export function cancelPrompt(dashboardSessionId) {
       }, 3000);
       entry.proc.once("close", () => clearTimeout(killTimer));
     }
+    // Mark done and cancelled so the close handler can report cancelled: true.
     // Mark done immediately so isPromptActive() returns false, but let the
     // process close handler do the actual map deletion to avoid a 3-second
     // window where a new prompt could race in before the old process exits.
     entry.done = true;
+    entry.cancelled = true;
     return true;
   }
   return false;

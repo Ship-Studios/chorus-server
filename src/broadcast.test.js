@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "bun:test";
+import { describe, expect, it, beforeEach, mock } from "bun:test";
 import { wsClients, broadcast } from "./broadcast.js";
 
 /**
@@ -90,5 +90,34 @@ describe("broadcast", () => {
     expect(client.sent).toHaveLength(2);
     expect(JSON.parse(client.sent[0]).type).toBe("first");
     expect(JSON.parse(client.sent[1]).type).toBe("second");
+  });
+
+  it("terminates slow client with high bufferedAmount", () => {
+    const normalClient = { readyState: 1, bufferedAmount: 0, send: mock(() => {}), terminate: mock(() => {}) };
+    const slowClient = { readyState: 1, bufferedAmount: 2_000_000, send: mock(() => {}), terminate: mock(() => {}) };
+
+    wsClients.add(normalClient);
+    wsClients.add(slowClient);
+
+    broadcast({ type: "test" });
+
+    expect(normalClient.send).toHaveBeenCalled();
+    expect(slowClient.send).not.toHaveBeenCalled();
+    expect(slowClient.terminate).toHaveBeenCalled();
+    expect(wsClients.has(slowClient)).toBe(false);
+    expect(wsClients.has(normalClient)).toBe(true);
+  });
+
+  it("removes CLOSED-state clients from wsClients", () => {
+    const closedClient = { readyState: 3, send: mock(() => {}), terminate: mock(() => {}) };
+    const openClient = { readyState: 1, bufferedAmount: 0, send: mock(() => {}), terminate: mock(() => {}) };
+
+    wsClients.add(closedClient);
+    wsClients.add(openClient);
+
+    broadcast({ type: "test" });
+
+    expect(wsClients.has(closedClient)).toBe(false);
+    expect(openClient.send).toHaveBeenCalled();
   });
 });

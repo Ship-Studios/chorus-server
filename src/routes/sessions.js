@@ -2,14 +2,14 @@ import { broadcast } from "../broadcast.js";
 import {
   upsertSession,
   updateSessionStatus,
-  getAllSessions,
   getSession,
+  getAllSessions,
   resolveSessionId,
   lookupSessionId,
   deleteSession,
   insertAlias,
 } from "../db.js";
-import { isPromptActive, cancelPrompt } from "../prompt.js";
+import { isPromptActive, cancelPrompt, getActiveSwarmAgents } from "../prompt.js";
 
 export default async function sessionRoutes(fastify) {
   fastify.post("/api/sessions", async (req, reply) => {
@@ -54,13 +54,18 @@ export default async function sessionRoutes(fastify) {
       $currentClaudeSessionId: hasActivePrompt ? null : claudeSessionId,
     });
 
-    broadcast({ type: "sessions:update", sessions: getAllSessions.all() });
+    broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
 
     // Notify UI about the swarm agent → session linkage
     if (swarmAgentId) {
+      // Look up the parent session ID from the in-memory swarm agent registry
+      const activeAgents = getActiveSwarmAgents();
+      const swarmEntry = activeAgents.find((a) => a.id === swarmAgentId);
+      const parentSessionId = swarmEntry?.sessionId ?? null;
       broadcast({
         type: "swarm:session-linked",
         agentId: swarmAgentId,
+        parentSessionId,
         dashboardSessionId: sessionId,
         claudeSessionId,
       });
@@ -85,7 +90,7 @@ export default async function sessionRoutes(fastify) {
         console.log(`Session ${sessionId} not found for stop, ignoring`);
       }
 
-      broadcast({ type: "sessions:update", sessions: getAllSessions.all() });
+      broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
       return { ok: true };
     },
   });
@@ -101,7 +106,7 @@ export default async function sessionRoutes(fastify) {
       return reply.code(400).send({ error: "Session not found" });
     }
 
-    broadcast({ type: "sessions:update", sessions: getAllSessions.all() });
+    broadcast({ type: "session:deleted", sessionId });
     return { ok: true };
   });
 }
