@@ -401,6 +401,31 @@ index 0000000..abc1234
     expect(files).toHaveLength(1);
     expect(files[0].newFileName).toBe("packages/server/new-file.js");
   });
+
+  it("strips submodule commit summary lines before nested diffs", () => {
+    const diff = `diff --git a/src/app.js b/src/app.js
+index aaa..bbb 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -1 +1,2 @@
+ console.log("app");
++console.log("next");
+Submodule packages/diff-panel 3729e42..61a1526:
+diff --git a/packages/diff-panel/package.json b/packages/diff-panel/package.json
+index ccc..ddd 100644
+--- a/packages/diff-panel/package.json
++++ b/packages/diff-panel/package.json
+@@ -1 +1,2 @@
+ {
++  "private": true
+ }
+`;
+    const files = parseDiffToFiles(diff);
+    expect(files).toHaveLength(2);
+    expect(files[0].newFileName).toBe("src/app.js");
+    expect(files[0].hunks[0]).not.toContain("Submodule packages/diff-panel 3729e42..61a1526:");
+    expect(files[1].newFileName).toBe("packages/diff-panel/package.json");
+  });
 });
 
 // ─── buildStatSummary ─────────────────────────────────────────────────────
