@@ -49,7 +49,7 @@ export default async function promptRoutes(fastify) {
       sessionId,
       { prompt: finalPrompt, cwd, claudeSessionId, permissionMode },
       (chunk) => broadcast({ type: "prompt:chunk", sessionId, chunk }),
-      (result) => broadcast({ type: "prompt:done", sessionId, exitCode: result.code }),
+      (result) => broadcast({ type: "prompt:done", sessionId, exitCode: result.code, error: result.error }),
     );
 
     return { ok: true, sessionId };
