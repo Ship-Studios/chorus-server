@@ -13,6 +13,8 @@ import {
 /** @type {Map<string, { id: string, controller: AbortController, proc: import("child_process").ChildProcess, description: string, status: string, startedAt: number, sessionId: string, worktreePath?: string, branchName?: string, baseBranch?: string, baseCwd: string }>} */
 const activeSwarmAgents = new Map();
 
+const MAX_SWARM_AGENTS = parseInt(process.env.MAX_SWARM_AGENTS || "10", 10);
+
 /**
  * Spawn a new independent Claude Code agent as part of a swarm.
  * Unlike sendPrompt, this does NOT resume an existing session — it launches
@@ -26,6 +28,10 @@ const activeSwarmAgents = new Map();
  * @returns {Promise<{ id: string, controller: AbortController }>}
  */
 export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode, maxTurns, model, parentSessionId, useWorktree }, onEvent) {
+  if (activeSwarmAgents.size >= MAX_SWARM_AGENTS) {
+    throw new Error(`Maximum concurrent swarm agents (${MAX_SWARM_AGENTS}) reached`);
+  }
+
   const id = randomUUID().slice(0, 12);
 
   const controller = new AbortController();
@@ -104,70 +110,76 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
   });
 
   proc.stderr.on("data", (data) => {
-    console.error(`[swarm:${id}] ${data.toString()}`);
+    const text = data.toString().trim();
+    if (text) {
+      console.error(`[swarm:${id}] stderr:`, text);
+      onEvent({ type: "swarm:chunk", agentId: id, chunk: { type: "stderr", text } });
+    }
   });
 
-  proc.on("close", async (code) => {
-    parser.flush();
+  proc.on("close", (code) => {
+    (async () => {
+      parser.flush();
 
-    // If cancelSwarmAgent() already ran, it handled cleanup — just emit done.
-    if (agent.status === "cancelled") {
-      onEvent({ type: "swarm:done", agentId: id, exitCode: code, cancelled: true, description });
-      return;
-    }
-
-    agent.status = code === 0 ? "completed" : "error";
-    activeSwarmAgents.delete(id);
-
-    // For worktree agents: commit any uncommitted changes before removing the checkout.
-    // The agent edits files in the working tree but doesn't commit — without this,
-    // removeWorktree discards all changes and the branch stays at the base commit.
-    if (worktreePath) {
-      try {
-        const statusOut = execFileSync(GIT, ["status", "--porcelain"], {
-          cwd: worktreePath,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-          timeout: 5000,
-        }).trim();
-        if (!statusOut) {
-          console.log(`[swarm:${id}] No changes to commit in worktree`);
-        } else {
-          console.log(`[swarm:${id}] Staging ${statusOut.split("\n").length} changed file(s)`);
-        }
-        execFileSync(GIT, ["add", "-A"], { cwd: worktreePath, stdio: "pipe", timeout: 10000 });
-        execFileSync(GIT, ["commit", "-m", `agent: ${description || id}`], {
-          cwd: worktreePath,
-          stdio: "pipe",
-          timeout: 10000,
-          env: { ...process.env, GIT_AUTHOR_NAME: "Agent", GIT_COMMITTER_NAME: "Agent", GIT_AUTHOR_EMAIL: "agent@dashboard", GIT_COMMITTER_EMAIL: "agent@dashboard" },
-        });
-        console.log(`[swarm:${id}] Committed agent changes to branch ${branchName}`);
-      } catch (err) {
-        // "nothing to commit" exits non-zero — that's fine
-        const msg = err.stderr?.toString?.().trim() || err.message;
-        if (!msg.includes("nothing to commit") && !msg.includes("nothing added to commit")) {
-          console.warn(`[swarm:${id}] Auto-commit warning: ${msg}`);
-        }
+      // If cancelSwarmAgent() already ran, it handled cleanup — just emit done.
+      if (agent.status === "cancelled") {
+        onEvent({ type: "swarm:done", agentId: id, exitCode: code, cancelled: true, description });
+        return;
       }
-      await removeWorktree(cwd, worktreePath);
-    }
 
-    // Gather branch stats for the worktree record (if applicable)
-    let worktreeStats = null;
-    if (branchName && baseBranch) {
-      const stats = getBranchDiffStats(cwd, baseBranch, branchName);
-      const conflictInfo = detectConflicts(cwd, baseBranch, branchName);
-      worktreeStats = { ...stats, conflictInfo, branchName, baseBranch };
-    }
+      agent.status = code === 0 ? "completed" : "error";
+      activeSwarmAgents.delete(id);
 
-    onEvent({
-      type: "swarm:done",
-      agentId: id,
-      exitCode: code,
-      description,
-      worktree: worktreeStats,
-    });
+      // For worktree agents: commit any uncommitted changes before removing the checkout.
+      // The agent edits files in the working tree but doesn't commit — without this,
+      // removeWorktree discards all changes and the branch stays at the base commit.
+      if (worktreePath) {
+        try {
+          const statusOut = execFileSync(GIT, ["status", "--porcelain"], {
+            cwd: worktreePath,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+            timeout: 5000,
+          }).trim();
+          if (!statusOut) {
+            console.log(`[swarm:${id}] No changes to commit in worktree`);
+          } else {
+            console.log(`[swarm:${id}] Staging ${statusOut.split("\n").length} changed file(s)`);
+          }
+          execFileSync(GIT, ["add", "-A"], { cwd: worktreePath, stdio: "pipe", timeout: 10000 });
+          execFileSync(GIT, ["commit", "-m", `agent: ${description || id}`], {
+            cwd: worktreePath,
+            stdio: "pipe",
+            timeout: 10000,
+            env: { ...process.env, GIT_AUTHOR_NAME: "Agent", GIT_COMMITTER_NAME: "Agent", GIT_AUTHOR_EMAIL: "agent@dashboard", GIT_COMMITTER_EMAIL: "agent@dashboard" },
+          });
+          console.log(`[swarm:${id}] Committed agent changes to branch ${branchName}`);
+        } catch (err) {
+          // "nothing to commit" exits non-zero — that's fine
+          const msg = err.stderr?.toString?.().trim() || err.message;
+          if (!msg.includes("nothing to commit") && !msg.includes("nothing added to commit")) {
+            console.warn(`[swarm:${id}] Auto-commit warning: ${msg}`);
+          }
+        }
+        await removeWorktree(cwd, worktreePath);
+      }
+
+      // Gather branch stats for the worktree record (if applicable)
+      let worktreeStats = null;
+      if (branchName && baseBranch) {
+        const stats = getBranchDiffStats(cwd, baseBranch, branchName);
+        const conflictInfo = detectConflicts(cwd, baseBranch, branchName);
+        worktreeStats = { ...stats, conflictInfo, branchName, baseBranch };
+      }
+
+      onEvent({
+        type: "swarm:done",
+        agentId: id,
+        exitCode: code,
+        description,
+        worktree: worktreeStats,
+      });
+    })().catch(err => console.error("[swarm] close handler error:", err));
   });
 
   proc.on("error", (err) => {
@@ -193,11 +205,12 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
  * Sets status to "cancelled" so the close handler skips cleanup
  * (this function handles cleanup directly to avoid a race).
  * @param {string} agentId
- * @returns {boolean}
+ * @returns {{ cancelled: boolean, sessionId: string | null }}
  */
 export function cancelSwarmAgent(agentId) {
   const entry = activeSwarmAgents.get(agentId);
   if (entry) {
+    const sessionId = entry.sessionId;
     entry.status = "cancelled"; // Signal to close handler to skip cleanup
     entry.controller.abort(); // sends SIGTERM
     // Escalate to SIGKILL if process doesn't exit within 3s
@@ -216,9 +229,9 @@ export function cancelSwarmAgent(agentId) {
     if (entry.branchName) {
       deleteBranch(entry.baseCwd, entry.branchName);
     }
-    return true;
+    return { cancelled: true, sessionId };
   }
-  return false;
+  return { cancelled: false, sessionId: null };
 }
 
 /**

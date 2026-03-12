@@ -8,6 +8,8 @@
  * @param {(chunk: object) => void} onChunk - Called for each parsed line
  * @returns {{ feed: (data: Buffer | string) => void, flush: () => void }}
  */
+const MAX_LINE_LENGTH = 512 * 1024;
+
 export function createStreamParser(onChunk) {
   let buffer = "";
 
@@ -18,6 +20,15 @@ export function createStreamParser(onChunk) {
      */
     feed(data) {
       buffer += data.toString();
+
+      // Safety valve: if we've accumulated a huge chunk with no newline,
+      // emit it as a raw event and reset to avoid unbounded memory growth.
+      if (buffer.length > MAX_LINE_LENGTH) {
+        onChunk({ type: "raw", text: buffer });
+        buffer = "";
+        return;
+      }
+
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
 

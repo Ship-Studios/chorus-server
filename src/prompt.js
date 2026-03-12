@@ -64,6 +64,11 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
     let stderrBuffer = "";
     let stdoutRaw = "";
     let didFallback = false;
+    // Guard against double-firing onDone (e.g. cancel route + close event).
+    // Each launchProcess call gets its own fresh flag.
+    let doneFired = false;
+
+    const MAX_STDERR = 4096;
 
     proc.stdout.on("data", (data) => {
       stdoutRaw += data.toString();
@@ -73,6 +78,9 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
     proc.stderr.on("data", (data) => {
       const text = data.toString();
       stderrBuffer += text;
+      if (stderrBuffer.length > MAX_STDERR) {
+        stderrBuffer = stderrBuffer.slice(-MAX_STDERR);
+      }
       console.error(`[prompt:${dashboardSessionId}] ${text}`);
       onChunk({ type: "stderr", text: text.trim() });
     });
@@ -90,6 +98,9 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
         return;
       }
 
+      if (doneFired) return;
+      doneFired = true;
+
       parser.flush();
       onDone({ code });
       const entry = activePrompts.get(dashboardSessionId);
@@ -98,6 +109,9 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
     });
 
     proc.on("error", (err) => {
+      if (doneFired) return;
+      doneFired = true;
+
       onDone({ code: null, error: err.message });
       const entry = activePrompts.get(dashboardSessionId);
       if (entry) entry.done = true;
@@ -129,7 +143,10 @@ export function cancelPrompt(dashboardSessionId) {
       }, 3000);
       entry.proc.once("close", () => clearTimeout(killTimer));
     }
-    activePrompts.delete(dashboardSessionId);
+    // Mark done immediately so isPromptActive() returns false, but let the
+    // process close handler do the actual map deletion to avoid a 3-second
+    // window where a new prompt could race in before the old process exits.
+    entry.done = true;
     return true;
   }
   return false;
