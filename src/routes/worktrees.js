@@ -11,8 +11,7 @@ import {
   deleteWorktreeRow,
   lookupSessionId,
 } from "../db.js";
-import { parseDiffToFiles, buildStatSummary } from "../diff.js";
-import { runGit } from "../run-git.js";
+import { parseDiffToFiles, buildStatSummary, runGit } from "@agent-dashboard/diff-panel/server";
 import { deleteBranch, detectConflicts, removeWorktree } from "../prompt.js";
 
 export default async function worktreeRoutes(fastify) {

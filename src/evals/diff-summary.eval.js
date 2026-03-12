@@ -15,7 +15,7 @@
  * run the evals, compare scores.
  */
 
-import { summarizeDiff, SYSTEM_PROMPT, DEFAULT_MODEL } from "../summarize-diff.js";
+import { summarizeDiff, SYSTEM_PROMPT, DEFAULT_MODEL } from "@agent-dashboard/diff-panel/server";
 import { fixtures } from "./fixtures.js";
 
 // ── Quality checks ──────────────────────────────────────────────────────────
