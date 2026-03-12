@@ -154,6 +154,20 @@ function lookupSessionId(testDb, claudeSessionId) {
 
 // ─── Build test Fastify app ─────────────────────────────────────────────────
 
+function deleteSession(testDb, sessionId) {
+  const session = testDb.getSession.get({ $id: sessionId });
+  if (!session) return false;
+  if (session.status === "active") return false;
+
+  testDb.db.exec(`DELETE FROM worktrees WHERE session_id = '${sessionId}'`);
+  testDb.db.exec(`DELETE FROM agents WHERE session_id = '${sessionId}'`);
+  testDb.db.exec(`DELETE FROM events WHERE session_id = '${sessionId}'`);
+  testDb.db.exec(`DELETE FROM session_aliases WHERE dashboard_session_id = '${sessionId}'`);
+  testDb.db.prepare(`DELETE FROM sessions WHERE id = $id`).run({ $id: sessionId });
+
+  return true;
+}
+
 function buildApp(testDb) {
   const app = Fastify({ logger: false });
 
@@ -284,10 +298,54 @@ function buildApp(testDb) {
     return testDb.getSessionAgents.all({ $sessionId: sessionId });
   });
 
+  // DELETE /api/sessions/:sessionId
+  app.delete("/api/sessions/:sessionId", async (req, reply) => {
+    const sessionId = lookupSessionId(testDb, req.params.sessionId);
+    const deleted = deleteSession(testDb, sessionId);
+    if (!deleted) {
+      return reply.code(400).send({ error: "Session not found or still active" });
+    }
+    return { ok: true };
+  });
+
   // GET /api/health
   app.get("/api/health", async () => ({ status: "ok", uptime: process.uptime() }));
 
-  return app;
+  // Worktree DB helpers (no git operations — just DB CRUD)
+  const insertWorktree = testDb.db.prepare(`
+    INSERT INTO worktrees (session_id, branch_name, base_branch, description, agent_id, status)
+    VALUES ($sessionId, $branchName, $baseBranch, $description, $agentId, $status)
+    ON CONFLICT (session_id, branch_name) DO UPDATE SET
+      description = excluded.description,
+      agent_id = excluded.agent_id,
+      status = excluded.status,
+      updated_at = datetime('now')
+    RETURNING id
+  `);
+  const getWorktree = testDb.db.prepare(`SELECT * FROM worktrees WHERE id = $id`);
+  const getSessionWorktrees = testDb.db.prepare(`SELECT * FROM worktrees WHERE session_id = $sessionId ORDER BY created_at DESC`);
+  const updateWorktreeStatus = testDb.db.prepare(`UPDATE worktrees SET status = $status, updated_at = datetime('now') WHERE id = $id`);
+
+  app.get("/api/sessions/:sessionId/worktrees", async (req) => {
+    const sessionId = lookupSessionId(testDb, req.params.sessionId);
+    return getSessionWorktrees.all({ $sessionId: sessionId });
+  });
+
+  app.post("/api/sessions/:sessionId/worktrees", async (req) => {
+    const sessionId = lookupSessionId(testDb, req.params.sessionId);
+    const { branchName, baseBranch, description, agentId } = req.body;
+    const { id } = insertWorktree.get({
+      $sessionId: sessionId,
+      $branchName: branchName,
+      $baseBranch: baseBranch || "main",
+      $description: description || null,
+      $agentId: agentId || null,
+      $status: "pending",
+    });
+    return { ok: true, id };
+  });
+
+  return { app, insertWorktree, getWorktree, getSessionWorktrees, updateWorktreeStatus };
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -295,10 +353,13 @@ function buildApp(testDb) {
 describe("API integration tests", () => {
   let app;
   let testDb;
+  let worktreeHelpers;
 
   beforeAll(async () => {
     testDb = createTestDb();
-    app = buildApp(testDb);
+    const built = buildApp(testDb);
+    app = built.app;
+    worktreeHelpers = built;
     await app.ready();
   });
 
@@ -841,6 +902,296 @@ describe("API integration tests", () => {
         body: "",
       });
       expect(res.statusCode).toBe(200);
+    });
+  });
+
+  // ─── Session deletion ─────────────────────────────────────────────
+
+  describe("DELETE /api/sessions/:sessionId", () => {
+    it("deletes a stopped session and its events", async () => {
+      // Create and populate session
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "delete-me", projectDir: "/del" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: { sessionId: "delete-me", toolName: "Read", summary: "test" },
+      });
+      // Stop it first
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions/delete-me/stop",
+      });
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: "/api/sessions/delete-me",
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().ok).toBe(true);
+
+      // Verify session and events are gone
+      const session = testDb.getSession.get({ $id: "delete-me" });
+      expect(session).toBeNull();
+      const events = testDb.getSessionEvents.all({ $sessionId: "delete-me" });
+      expect(events).toHaveLength(0);
+    });
+
+    it("returns 400 for active sessions", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "still-active", projectDir: "/active" },
+      });
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: "/api/sessions/still-active",
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("Session not found or still active");
+    });
+
+    it("returns 400 for non-existent sessions", async () => {
+      const res = await app.inject({
+        method: "DELETE",
+        url: "/api/sessions/does-not-exist-xyz",
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("cascading delete removes agents too", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "del-with-agents", projectDir: "/delag" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: {
+          sessionId: "del-with-agents",
+          toolName: "Agent",
+          payload: { input: { description: "test agent", prompt: "do something" } },
+        },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions/del-with-agents/stop",
+      });
+
+      // Verify agent exists before delete
+      const agentsBefore = testDb.getSessionAgents.all({ $sessionId: "del-with-agents" });
+      expect(agentsBefore.length).toBeGreaterThan(0);
+
+      const res = await app.inject({ method: "DELETE", url: "/api/sessions/del-with-agents" });
+      expect(res.statusCode).toBe(200);
+
+      const agentsAfter = testDb.getSessionAgents.all({ $sessionId: "del-with-agents" });
+      expect(agentsAfter).toHaveLength(0);
+    });
+  });
+
+  // ─── Worktree DB operations ───────────────────────────────────────
+
+  describe("Worktree DB operations", () => {
+    it("creates and lists worktrees for a session", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "wt-session", projectDir: "/wt" },
+      });
+
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/sessions/wt-session/worktrees",
+        payload: {
+          branchName: "agent/fix-bug-abc123",
+          baseBranch: "main",
+          description: "fix bug",
+        },
+      });
+      expect(createRes.statusCode).toBe(200);
+      expect(createRes.json().ok).toBe(true);
+
+      const listRes = await app.inject({
+        method: "GET",
+        url: "/api/sessions/wt-session/worktrees",
+      });
+      expect(listRes.statusCode).toBe(200);
+      const worktrees = listRes.json();
+      expect(worktrees.length).toBeGreaterThanOrEqual(1);
+      expect(worktrees[0].branch_name).toBe("agent/fix-bug-abc123");
+      expect(worktrees[0].base_branch).toBe("main");
+      expect(worktrees[0].description).toBe("fix bug");
+    });
+
+    it("enforces unique constraint on (session_id, branch_name)", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "wt-unique", projectDir: "/wtu" },
+      });
+
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions/wt-unique/worktrees",
+        payload: { branchName: "agent/dupe-branch", description: "first" },
+      });
+
+      // Second insert with same branch should upsert (ON CONFLICT DO UPDATE)
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/sessions/wt-unique/worktrees",
+        payload: { branchName: "agent/dupe-branch", description: "updated" },
+      });
+      expect(res.statusCode).toBe(200);
+
+      const list = await app.inject({
+        method: "GET",
+        url: "/api/sessions/wt-unique/worktrees",
+      });
+      const worktrees = list.json();
+      const matching = worktrees.filter((w) => w.branch_name === "agent/dupe-branch");
+      expect(matching).toHaveLength(1);
+      expect(matching[0].description).toBe("updated");
+    });
+
+    it("worktrees are cascade-deleted with session", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "wt-cascade", projectDir: "/wtc" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions/wt-cascade/worktrees",
+        payload: { branchName: "agent/cascade-test", description: "will be deleted" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions/wt-cascade/stop",
+      });
+
+      const res = await app.inject({ method: "DELETE", url: "/api/sessions/wt-cascade" });
+      expect(res.statusCode).toBe(200);
+
+      // Verify worktrees are gone (using raw DB since session no longer exists)
+      const remaining = testDb.db
+        .prepare("SELECT * FROM worktrees WHERE session_id = $sid")
+        .all({ $sid: "wt-cascade" });
+      expect(remaining).toHaveLength(0);
+    });
+
+    it("returns empty worktree list for session with no worktrees", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "no-wt", projectDir: "/nowt" },
+      });
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/sessions/no-wt/worktrees",
+      });
+      expect(res.json()).toEqual([]);
+    });
+  });
+
+  // ─── Event edge cases ─────────────────────────────────────────────
+
+  describe("Event edge cases", () => {
+    it("defaults event type to tool_use", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "type-default", projectDir: "/td" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: { sessionId: "type-default", toolName: "Bash" },
+      });
+
+      const events = testDb.getSessionEvents.all({ $sessionId: "type-default" });
+      expect(events[0].type).toBe("tool_use");
+    });
+
+    it("preserves custom event type", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "custom-type", projectDir: "/ct" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: { sessionId: "custom-type", type: "lifecycle", toolName: "SessionStart" },
+      });
+
+      const events = testDb.getSessionEvents.all({ $sessionId: "custom-type" });
+      expect(events[0].type).toBe("lifecycle");
+    });
+
+    it("handles events with all optional fields null", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "minimal-event", projectDir: "/min" },
+      });
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/events",
+        payload: { sessionId: "minimal-event" },
+      });
+      expect(res.statusCode).toBe(200);
+
+      const events = testDb.getSessionEvents.all({ $sessionId: "minimal-event" });
+      expect(events[0].tool_name).toBeNull();
+      expect(events[0].file_path).toBeNull();
+      expect(events[0].summary).toBeNull();
+      expect(events[0].payload).toBeNull();
+    });
+  });
+
+  // ─── Session model preservation ────────────────────────────────────
+
+  describe("Session model handling", () => {
+    it("preserves existing model when new upsert sends null", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "model-keep", projectDir: "/mk", model: "claude-opus-4-20250514" },
+      });
+
+      // Upsert without model (e.g., from a hook that doesn't include it)
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "model-keep", projectDir: "/mk" },
+      });
+
+      const session = testDb.getSession.get({ $id: "model-keep" });
+      expect(session.model).toBe("claude-opus-4-20250514");
+    });
+
+    it("updates model when a new value is provided", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "model-update", projectDir: "/mu", model: "old-model" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "model-update", projectDir: "/mu", model: "new-model" },
+      });
+
+      const session = testDb.getSession.get({ $id: "model-update" });
+      expect(session.model).toBe("new-model");
     });
   });
 });
