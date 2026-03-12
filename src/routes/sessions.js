@@ -7,6 +7,7 @@ import {
   resolveSessionId,
   lookupSessionId,
   deleteSession,
+  insertAlias,
 } from "../db.js";
 import { isPromptActive } from "../prompt.js";
 
@@ -15,12 +16,25 @@ export default async function sessionRoutes(fastify) {
     const body = req.body ?? {};
     const claudeSessionId = body.sessionId;
     const projectDir = body.projectDir || "unknown";
+    const swarmAgentId = body.agentId || null;
 
     if (!claudeSessionId) {
       return reply.code(400).send({ error: "sessionId is required" });
     }
 
-    const sessionId = resolveSessionId(claudeSessionId, projectDir);
+    // When a swarm agent panel sends its agentId, force a new session
+    // (skip alias resolution which would merge it into the parent session).
+    let sessionId;
+    if (swarmAgentId) {
+      sessionId = claudeSessionId;
+      insertAlias.run({
+        $claudeSessionId: claudeSessionId,
+        $dashboardSessionId: claudeSessionId,
+      });
+    } else {
+      sessionId = resolveSessionId(claudeSessionId, projectDir);
+    }
+
     const isAliasedToExisting = sessionId !== claudeSessionId;
     const existingSession = isAliasedToExisting ? getSession.get({ $id: sessionId }) : null;
     const isWorktree =
@@ -41,6 +55,17 @@ export default async function sessionRoutes(fastify) {
     });
 
     broadcast({ type: "sessions:update", sessions: getAllSessions.all() });
+
+    // Notify UI about the swarm agent → session linkage
+    if (swarmAgentId) {
+      broadcast({
+        type: "swarm:session-linked",
+        agentId: swarmAgentId,
+        dashboardSessionId: sessionId,
+        claudeSessionId,
+      });
+    }
+
     return { ok: true };
   });
 

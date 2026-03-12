@@ -215,7 +215,7 @@ const getAlias = db.prepare(`
   SELECT dashboard_session_id FROM session_aliases WHERE claude_session_id = $claudeSessionId
 `);
 
-const insertAlias = db.prepare(`
+export const insertAlias = db.prepare(`
   INSERT OR REPLACE INTO session_aliases (claude_session_id, dashboard_session_id)
   VALUES ($claudeSessionId, $dashboardSessionId)
 `);

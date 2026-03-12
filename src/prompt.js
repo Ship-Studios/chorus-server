@@ -414,7 +414,7 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
   const proc = spawn("claude", args, {
     cwd: effectiveCwd,
     signal: controller.signal,
-    env: { ...process.env },
+    env: { ...process.env, DASHBOARD_SWARM_AGENT_ID: id },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
