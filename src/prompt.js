@@ -112,13 +112,23 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
 
 /**
  * Cancel a running prompt for a session.
+ * Uses SIGTERM first, then escalates to SIGKILL after a timeout
+ * in case Claude Code ignores SIGTERM (a known issue).
  * @param {string} dashboardSessionId
  * @returns {boolean} Whether a prompt was cancelled
  */
 export function cancelPrompt(dashboardSessionId) {
   const entry = activePrompts.get(dashboardSessionId);
   if (entry && !entry.done) {
-    entry.controller.abort();
+    entry.controller.abort(); // sends SIGTERM
+    // Escalate to SIGKILL if process doesn't exit within 3s
+    const pid = entry.proc?.pid;
+    if (pid) {
+      const killTimer = setTimeout(() => {
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }, 3000);
+      entry.proc.once("close", () => clearTimeout(killTimer));
+    }
     activePrompts.delete(dashboardSessionId);
     return true;
   }

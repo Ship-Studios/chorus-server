@@ -305,7 +305,7 @@ const deleteSessionRow = db.prepare(`
 
 /**
  * Delete a session and all its associated data (events, agents, aliases).
- * Only deletes stopped sessions — returns false for active ones.
+ * Active sessions are force-stopped before deletion.
  *
  * @param {string} sessionId
  * @returns {boolean} Whether the session was deleted
@@ -313,9 +313,11 @@ const deleteSessionRow = db.prepare(`
 export function deleteSession(sessionId) {
   const session = getSession.get({ $id: sessionId });
   if (!session) return false;
-  if (session.status === "active") return false;
 
   db.transaction(() => {
+    if (session.status === "active") {
+      updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
+    }
     deleteSessionWorktrees.run({ $sessionId: sessionId });
     deleteSessionAgents.run({ $sessionId: sessionId });
     deleteSessionEvents.run({ $sessionId: sessionId });

@@ -109,6 +109,13 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
 
   proc.on("close", async (code) => {
     parser.flush();
+
+    // If cancelSwarmAgent() already ran, it handled cleanup — just emit done.
+    if (agent.status === "cancelled") {
+      onEvent({ type: "swarm:done", agentId: id, exitCode: code, cancelled: true, description });
+      return;
+    }
+
     agent.status = code === 0 ? "completed" : "error";
     activeSwarmAgents.delete(id);
 
@@ -181,14 +188,26 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
 
 /**
  * Cancel a running swarm agent.
+ * Uses SIGTERM first, then escalates to SIGKILL after a timeout
+ * in case Claude Code ignores SIGTERM (a known issue).
+ * Sets status to "cancelled" so the close handler skips cleanup
+ * (this function handles cleanup directly to avoid a race).
  * @param {string} agentId
  * @returns {boolean}
  */
 export function cancelSwarmAgent(agentId) {
   const entry = activeSwarmAgents.get(agentId);
   if (entry) {
-    entry.controller.abort();
-    entry.status = "cancelled";
+    entry.status = "cancelled"; // Signal to close handler to skip cleanup
+    entry.controller.abort(); // sends SIGTERM
+    // Escalate to SIGKILL if process doesn't exit within 3s
+    const pid = entry.proc?.pid;
+    if (pid) {
+      const killTimer = setTimeout(() => {
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }, 3000);
+      entry.proc.once("close", () => clearTimeout(killTimer));
+    }
     activeSwarmAgents.delete(agentId);
     // Clean up worktree and branch (cancelled = no useful work)
     if (entry.worktreePath) {
