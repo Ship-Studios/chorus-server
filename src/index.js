@@ -21,7 +21,7 @@ const PORT = process.env.PORT ?? 3001;
 
 const app = Fastify({ logger: true });
 
-await app.register(cors, { origin: true });
+await app.register(cors, { origin: true, methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] });
 await app.register(websocket);
 
 // WebSocket endpoint — sends current state on connect, tracks clients for broadcast
