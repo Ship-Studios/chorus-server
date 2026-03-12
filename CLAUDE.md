@@ -28,14 +28,14 @@ Fastify 5 server — plain JS (ESM, no build step), `bun:sqlite` for persistence
 - **`db.js`** — Schema creation (7 tables), all prepared statements (exported), cascading session deletion. Re-exports `resolveSessionId`/`lookupSessionId` from `session-resolver.js` for backward compatibility. Exports alias-related prepared statements (`getAlias`, `insertAlias`, `findActiveSessionByDir`, etc.) consumed by the session resolver.
 - **`session-resolver.js`** — Session alias resolution (`resolveSessionId` / `lookupSessionId`) with git root caching (200-entry LRU). The alias system maps multiple Claude CLI session IDs to one dashboard session via a 5-step resolution chain (alias → active dir → recent dir → git root → new). Extracted from `db.js` to separate declarative SQL from resolution logic.
 - **`broadcast.js`** — `wsClients` Set + `broadcast()` helper. Every route that mutates state calls `broadcast()` to push updates.
-- **`git.js`** — Resolves a working `git` binary at startup (handles VPN-blocked paths). Exports `GIT` constant used everywhere.
-- **`run-git.js`** — Promise-based `spawn(GIT, args, { cwd })` with timeout (30s) and buffer limits (10MB).
-- **`diff.js`** — Parses unified diff output into `{ oldFileName, newFileName, fileLang, hunks }` for the `@git-diff-view/svelte` component.
+- **`git.js`** — Re-exports `GIT` from `@agent-dashboard/diff-panel/server`. Resolves a working `git` binary at startup (handles VPN-blocked paths).
+- **`run-git.js`** — Re-exports `runGit` from `@agent-dashboard/diff-panel/server`. Promise-based `spawn(GIT, args, { cwd })` with timeout (30s) and buffer limits (10MB).
+- **`diff.js`** — Re-exports `parseDiffToFiles` and `buildStatSummary` from `@agent-dashboard/diff-panel/server`. Parses unified diff output into `{ oldFileName, newFileName, fileLang, hunks }` arrays.
 - **`stream-parser.js`** — Line-buffered JSON stream parser for Claude CLI `--output-format stream-json` output. Exports `createStreamParser(onChunk)` returning `{ feed(data), flush() }`. Used by both `prompt.js` and `swarm-manager.js`.
 - **`prompt.js`** — Manages `claude --resume`/`--print` subprocesses for prompt submission. Streams JSON chunks via WebSocket. One active prompt per session (409 on conflict). Re-exports swarm functions from `swarm-manager.js` and git functions from `git-worktree.js` for backward compatibility.
 - **`swarm-manager.js`** — Manages lifecycle of swarm agents spawned via `POST /api/swarm/spawn`. Handles process spawning, streaming, auto-commit of worktree changes, and cleanup. Extracted from `prompt.js` to separate prompt lifecycle from swarm lifecycle.
 - **`git-worktree.js`** — Git worktree operations: `createWorktree`, `removeWorktree` (with retry), `deleteBranch`, `getBranchDiffStats`, `detectConflicts`, `getCurrentBranch`, `slugify`. Extracted from `prompt.js` to isolate git operations from process management.
-- **`summarize-diff.js`** — Core diff summarization via `@anthropic-ai/sdk`. Exports the system/user prompts and `summarizeDiff()` so the same logic is shared between the route handler and the eval suite (`src/evals/`).
+- **`summarize-diff.js`** — Re-exports from `@agent-dashboard/diff-panel/server`. Core diff summarization via `@anthropic-ai/sdk`. Exports the system/user prompts and `summarizeDiff()` so the same logic is shared between the route handler and the eval suite (`src/evals/`).
 - **`architecture.js`** — Project source file scanner that builds directory trees and import-graph flows for the architecture visualization. 30s in-memory cache per project.
 
 ## Route Modules (`src/routes/`)
