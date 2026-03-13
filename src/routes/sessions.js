@@ -10,6 +10,7 @@ import {
   insertAlias,
 } from "../db.js";
 import { isPromptActive, cancelPrompt, getActiveSwarmAgents, hasActiveSwarmAgents } from "../prompt.js";
+import { startWatching, stopWatching } from "../git-watcher.js";
 
 export default async function sessionRoutes(fastify) {
   fastify.post("/api/sessions", async (req, reply) => {
@@ -55,6 +56,10 @@ export default async function sessionRoutes(fastify) {
     });
 
     broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
+
+    // Start watching .git for changes (deduplicates by directory)
+    const watchDir = isWorktree ? projectDir : (body.worktreeDir ?? projectDir);
+    startWatching(sessionId, watchDir);
 
     // Notify UI about the swarm agent → session linkage
     if (swarmAgentId) {
@@ -106,7 +111,8 @@ export default async function sessionRoutes(fastify) {
     if (hasActiveSwarmAgents(sessionId)) {
       return reply.code(400).send({ error: "Session has active swarm agents" });
     }
-    // Cancel any active prompt subprocess before deletion
+    // Stop git watcher and cancel any active prompt before deletion
+    stopWatching(sessionId, session.worktree_dir || session.project_dir);
     cancelPrompt(sessionId);
     const deleted = deleteSession(sessionId);
     if (!deleted) {

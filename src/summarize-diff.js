@@ -7,6 +7,7 @@ export {
   truncateDiff,
   buildUserPrompt,
   MAX_DIFF_CHARS,
+  MAX_SUMMARY_CHARS,
   DEFAULT_MODEL,
   SYSTEM_PROMPT,
 } from "@agent-dashboard/diff-panel/server";

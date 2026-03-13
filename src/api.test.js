@@ -292,6 +292,73 @@ function buildApp(testDb) {
     return testDb.getRecentEvents.all();
   });
 
+  // POST /api/hooks/pre-tool-use — HTTP hook adapter (snake_case payload)
+  app.post("/api/hooks/pre-tool-use", async (req, reply) => {
+    const body = req.body ?? {};
+    const rawId = body.session_id;
+    const toolName = body.tool_name;
+    if (!rawId) return reply.code(200).send();
+    const writeOps = new Set(["Edit", "Write", "Bash", "MultiEdit"]);
+    if (!writeOps.has(toolName)) return reply.code(200).send();
+    return reply.code(200).send();
+  });
+
+  // POST /api/hooks/stop — HTTP hook adapter (snake_case payload)
+  app.post("/api/hooks/stop", async (req, reply) => {
+    const body = req.body ?? {};
+    const rawId = body.session_id;
+    if (!rawId) return reply.code(200).send();
+    const sessionId = lookupSessionId(testDb, rawId);
+    try {
+      testDb.updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
+    } catch { /* ignore */ }
+    return reply.code(200).send({ ok: true });
+  });
+
+  // POST /api/hooks/post-tool-use — HTTP hook adapter (snake_case payload)
+  app.post("/api/hooks/post-tool-use", async (req, reply) => {
+    const body = req.body ?? {};
+    const rawId = body.session_id;
+    if (!rawId) return reply.code(200).send();
+    const projectDir = body.cwd || "unknown";
+    const sessionId = resolveSessionId(testDb, rawId, projectDir);
+    testDb.upsertSession.run({
+      $id: sessionId, $projectDir: projectDir, $worktreeDir: null,
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    const toolInput = body.tool_input ?? {};
+    const toolName = body.tool_name;
+    let summary;
+    if (toolInput.command) summary = `${toolName}: ${toolInput.command.slice(0, 120)}`;
+    else if (toolInput.file_path || toolInput.path) summary = `${toolName} on ${toolInput.file_path || toolInput.path}`;
+    else summary = toolName || "unknown";
+    testDb.insertEvent.get({
+      $sessionId: sessionId, $type: "tool_use", $toolName: toolName ?? null,
+      $filePath: toolInput.file_path || toolInput.path || null, $summary: summary,
+      $payload: JSON.stringify({ input: toolInput, response: body.tool_response }),
+    });
+    return reply.code(200).send({ ok: true });
+  });
+
+  // POST /api/hooks/post-tool-use-failure — HTTP hook adapter
+  app.post("/api/hooks/post-tool-use-failure", async (req, reply) => {
+    const body = req.body ?? {};
+    const rawId = body.session_id;
+    if (!rawId) return reply.code(200).send();
+    const projectDir = body.cwd || "unknown";
+    const sessionId = resolveSessionId(testDb, rawId, projectDir);
+    const toolName = body.tool_name;
+    const toolInput = body.tool_input ?? {};
+    const error = body.error || "Tool failed";
+    testDb.insertEvent.get({
+      $sessionId: sessionId, $type: "tool_error", $toolName: toolName ?? null,
+      $filePath: toolInput.file_path || toolInput.path || null,
+      $summary: `${toolName} failed: ${error.slice(0, 120)}`,
+      $payload: JSON.stringify({ error, input: toolInput }),
+    });
+    return reply.code(200).send({ ok: true });
+  });
+
   // GET /api/sessions/:sessionId/agents
   app.get("/api/sessions/:sessionId/agents", async (req) => {
     const sessionId = lookupSessionId(testDb, req.params.sessionId);
@@ -587,6 +654,116 @@ describe("API integration tests", () => {
 
       const events = testDb.getSessionEvents.all({ $sessionId: "null-payload" });
       expect(events[0].payload).toBeNull();
+    });
+  });
+
+  // ─── HTTP hook adapters ────────────────────────────────────────────
+
+  describe("POST /api/hooks/pre-tool-use", () => {
+    it("returns 200 for write-op tools (Edit)", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/hooks/pre-tool-use",
+        payload: { session_id: "hook-test", tool_name: "Edit", cwd: "/test" },
+      });
+      expect(res.statusCode).toBe(200);
+    });
+
+    it("returns 200 for non-write tools (Read) without broadcasting", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/hooks/pre-tool-use",
+        payload: { session_id: "hook-test", tool_name: "Read", cwd: "/test" },
+      });
+      expect(res.statusCode).toBe(200);
+    });
+
+    it("returns 200 with no body when session_id is missing", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/hooks/pre-tool-use",
+        payload: { tool_name: "Edit" },
+      });
+      expect(res.statusCode).toBe(200);
+    });
+  });
+
+  describe("POST /api/hooks/stop", () => {
+    it("marks session as stopped via snake_case payload", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { sessionId: "hook-stop-test", projectDir: "/stop" },
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/hooks/stop",
+        payload: { session_id: "hook-stop-test", cwd: "/stop" },
+      });
+      expect(res.statusCode).toBe(200);
+
+      const session = testDb.getSession.get({ $id: "hook-stop-test" });
+      expect(session.status).toBe("stopped");
+    });
+
+    it("returns 200 gracefully when session_id is missing", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/hooks/stop",
+        payload: { cwd: "/test" },
+      });
+      expect(res.statusCode).toBe(200);
+    });
+  });
+
+  describe("POST /api/hooks/post-tool-use", () => {
+    it("creates event from snake_case PostToolUse payload", async () => {
+      await app.inject({ method: "POST", url: "/api/sessions", payload: { sessionId: "http-ptu-session", projectDir: "/ptu" } });
+      const res = await app.inject({
+        method: "POST", url: "/api/hooks/post-tool-use",
+        payload: { session_id: "http-ptu-session", tool_name: "Edit", tool_input: { file_path: "/ptu/index.ts" }, tool_response: { success: true }, cwd: "/ptu" },
+      });
+      expect(res.statusCode).toBe(200);
+      const events = testDb.getSessionEvents.all({ $sessionId: "http-ptu-session" });
+      const ev = events.find(e => e.tool_name === "Edit");
+      expect(ev).toBeTruthy();
+      expect(ev.summary).toBe("Edit on /ptu/index.ts");
+    });
+
+    it("generates Bash summary from command", async () => {
+      await app.inject({
+        method: "POST", url: "/api/hooks/post-tool-use",
+        payload: { session_id: "http-ptu-session", tool_name: "Bash", tool_input: { command: "npm test" }, cwd: "/ptu" },
+      });
+      const events = testDb.getSessionEvents.all({ $sessionId: "http-ptu-session" });
+      const ev = events.find(e => e.tool_name === "Bash");
+      expect(ev.summary).toBe("Bash: npm test");
+    });
+
+    it("returns 200 when session_id missing", async () => {
+      const res = await app.inject({ method: "POST", url: "/api/hooks/post-tool-use", payload: { tool_name: "Edit" } });
+      expect(res.statusCode).toBe(200);
+    });
+  });
+
+  describe("POST /api/hooks/post-tool-use-failure", () => {
+    it("creates tool_error event from failure payload", async () => {
+      await app.inject({ method: "POST", url: "/api/sessions", payload: { sessionId: "http-fail-session", projectDir: "/fail" } });
+      const res = await app.inject({
+        method: "POST", url: "/api/hooks/post-tool-use-failure",
+        payload: { session_id: "http-fail-session", tool_name: "Edit", tool_input: { file_path: "/fail/missing.ts" }, error: "File not found", cwd: "/fail" },
+      });
+      expect(res.statusCode).toBe(200);
+      const events = testDb.getSessionEvents.all({ $sessionId: "http-fail-session" });
+      const ev = events.find(e => e.type === "tool_error");
+      expect(ev).toBeTruthy();
+      expect(ev.summary).toContain("failed:");
+    });
+
+    it("returns 200 when session_id missing", async () => {
+      const res = await app.inject({ method: "POST", url: "/api/hooks/post-tool-use-failure", payload: { tool_name: "Bash", error: "not found" } });
+      expect(res.statusCode).toBe(200);
     });
   });
 

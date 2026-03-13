@@ -1,7 +1,6 @@
 import { broadcast } from "../broadcast.js";
 import {
   upsertSession,
-  updateSessionStatus,
   insertEvent,
   getEvent,
   getSessionEvents,
@@ -10,7 +9,10 @@ import {
   getSessionAgents,
   resolveSessionId,
   lookupSessionId,
+  updateSessionStatus,
+  getSession,
 } from "../db.js";
+import { isPromptActive } from "../prompt.js";
 
 export default async function eventRoutes(fastify) {
   // Hook: tool use event (file edit, bash command, etc.)
@@ -107,32 +109,151 @@ export default async function eventRoutes(fastify) {
   });
 
   // HTTP hook adapter: receives Claude Code's snake_case PreToolUse payload directly
-  // Only signals for file-modifying tools; returns empty 200 for others
   fastify.post("/api/hooks/pre-tool-use", async (req, reply) => {
     const body = req.body ?? {};
     const rawId = body.session_id;
     const toolName = body.tool_name;
     if (!rawId) return reply.code(200).send();
-    const writeOps = new Set(["Edit", "Write", "Bash", "MultiEdit"]);
-    if (!writeOps.has(toolName)) return reply.code(200).send();
     const sessionId = lookupSessionId(rawId) || rawId;
     broadcast({ type: "diff:pending", sessionId, toolName });
     return reply.code(200).send();
   });
 
+  // HTTP hook adapter: receives Claude Code's snake_case PostToolUse payload directly
+  // Handles session heartbeat + event logging + agent detection in one request
+  fastify.post("/api/hooks/post-tool-use", async (req, reply) => {
+    const body = req.body ?? {};
+    const rawId = body.session_id;
+    if (!rawId) return reply.code(200).send();
+
+    const projectDir = body.cwd || "unknown";
+    const sessionId = resolveSessionId(rawId, projectDir);
+    const toolName = body.tool_name;
+    const toolInput = body.tool_input ?? {};
+    const toolResponse = body.tool_response ?? {};
+
+    // Session heartbeat
+    upsertSession.run({
+      $id: sessionId,
+      $projectDir: projectDir,
+      $worktreeDir: null,
+      $status: "active",
+      $model: null,
+      $currentClaudeSessionId: null,
+    });
+
+    // Generate summary (same priority as bash script)
+    let summary;
+    if (toolInput.command) {
+      summary = `${toolName}: ${toolInput.command.slice(0, 120)}`;
+    } else if (toolName === "Agent" && toolInput.description) {
+      summary = `Agent: ${toolInput.description.slice(0, 120)}`;
+    } else if (toolInput.file_path || toolInput.path) {
+      summary = `${toolName} on ${toolInput.file_path || toolInput.path}`;
+    } else {
+      summary = toolName || "unknown";
+    }
+
+    // Truncate large string values in payload to ~50KB
+    const truncate = (obj) => {
+      if (typeof obj === "string") return obj.length > 50000 ? obj.slice(0, 50000) + "…[truncated]" : obj;
+      if (Array.isArray(obj)) return obj.map(truncate);
+      if (obj && typeof obj === "object") {
+        const out = {};
+        for (const [k, v] of Object.entries(obj)) out[k] = truncate(v);
+        return out;
+      }
+      return obj;
+    };
+
+    const { id: eventId } = insertEvent.get({
+      $sessionId: sessionId,
+      $type: "tool_use",
+      $toolName: toolName ?? null,
+      $filePath: toolInput.file_path || toolInput.path || null,
+      $summary: summary,
+      $payload: JSON.stringify({ input: truncate(toolInput), response: truncate(toolResponse) }),
+    });
+
+    const event = {
+      id: eventId, sessionId, type: "tool_use", toolName,
+      filePath: toolInput.file_path || toolInput.path,
+      summary, hasPayload: true, createdAt: new Date().toISOString(),
+    };
+
+    broadcast({ type: "event:new", event });
+
+    // Diff invalidation for write-ops (PostToolUse only fires on success)
+    const isWriteOp = toolName === "Edit" || toolName === "Write" || toolName === "Bash" || toolName === "MultiEdit";
+    if (isWriteOp) {
+      broadcast({ type: "diff:invalidated", sessionId });
+    }
+
+    // Auto-detect Agent tool calls
+    if (toolName === "Agent") {
+      const description = toolInput.description || toolInput.prompt?.slice(0, 120) || "Sub-agent";
+      const agentType = toolInput.subagent_type || "general-purpose";
+      const prompt = toolInput.prompt || null;
+      const { id: agentId } = insertAgent.get({
+        $sessionId: sessionId, $eventId: eventId, $description: description,
+        $agentType: agentType, $prompt: prompt ? prompt.slice(0, 2000) : null, $status: "completed",
+      });
+      broadcast({
+        type: "agent:new",
+        agent: { id: agentId, sessionId, eventId, description, agentType, status: "completed", createdAt: new Date().toISOString() },
+      });
+    }
+
+    return reply.code(200).send();
+  });
+
+  // HTTP hook adapter: receives Claude Code's PostToolUseFailure payload
+  fastify.post("/api/hooks/post-tool-use-failure", async (req, reply) => {
+    const body = req.body ?? {};
+    const rawId = body.session_id;
+    if (!rawId) return reply.code(200).send();
+
+    const projectDir = body.cwd || "unknown";
+    const sessionId = resolveSessionId(rawId, projectDir);
+    const toolName = body.tool_name;
+    const toolInput = body.tool_input ?? {};
+    const error = body.error || "Tool failed";
+
+    const { id: eventId } = insertEvent.get({
+      $sessionId: sessionId,
+      $type: "tool_error",
+      $toolName: toolName ?? null,
+      $filePath: toolInput.file_path || toolInput.path || null,
+      $summary: `${toolName} failed: ${error.slice(0, 120)}`,
+      $payload: JSON.stringify({ error, input: toolInput }),
+    });
+
+    broadcast({
+      type: "event:new",
+      event: {
+        id: eventId, sessionId, type: "tool_error", toolName,
+        filePath: toolInput.file_path || toolInput.path,
+        summary: `${toolName} failed: ${error.slice(0, 120)}`,
+        hasPayload: true, createdAt: new Date().toISOString(),
+      },
+    });
+
+    return reply.code(200).send();
+  });
+
   // HTTP hook adapter: receives Claude Code's snake_case Stop payload directly
-  // Delegates to the existing stop endpoint logic (check prompt active, broadcast full session)
   fastify.post("/api/hooks/stop", async (req, reply) => {
     const body = req.body ?? {};
     const rawId = body.session_id;
     if (!rawId) return reply.code(200).send();
     const sessionId = lookupSessionId(rawId) || rawId;
-    // Forward to the canonical stop endpoint
-    const res = await fastify.inject({
-      method: "POST",
-      url: `/api/sessions/${sessionId}/stop`,
-    });
-    return reply.code(res.statusCode).send(res.json());
+    if (isPromptActive(sessionId)) return reply.code(200).send();
+    try {
+      updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
+    } catch { /* session may not exist */ }
+    const session = getSession.get({ $id: sessionId });
+    if (session) broadcast({ type: "session:updated", session });
+    return reply.code(200).send();
   });
 
   fastify.get("/api/sessions/:sessionId/events", async (req) => {

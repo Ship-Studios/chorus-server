@@ -11,7 +11,7 @@ describe("summarize-diff constants", () => {
   it("exports a non-empty system prompt", () => {
     expect(SYSTEM_PROMPT.length).toBeGreaterThan(0);
     expect(SYSTEM_PROMPT).toContain("dashboard");
-    expect(SYSTEM_PROMPT).toContain("120 words");
+    expect(SYSTEM_PROMPT).toContain("100 words");
     // Must NOT contain bold instructions (contradicts eval's no-bold-text check)
     expect(SYSTEM_PROMPT).not.toContain("**bold**");
   });

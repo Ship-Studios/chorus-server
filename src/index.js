@@ -6,7 +6,8 @@ import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { wsClients, broadcast } from "./broadcast.js";
-import { getAllSessions, getRecentEvents, getRecentAgents, getAllActiveWorktrees } from "./db.js";
+import { getAllSessions, getActiveSessions, getRecentEvents, getRecentAgents, getAllActiveWorktrees } from "./db.js";
+import { initWatchers, shutdownWatchers } from "./git-watcher.js";
 import sessionRoutes from "./routes/sessions.js";
 import eventRoutes from "./routes/events.js";
 import diffRoutes from "./routes/diff.js";
@@ -79,6 +80,7 @@ const heartbeatInterval = setInterval(() => {
 
 app.addHook("onClose", () => {
   clearInterval(heartbeatInterval);
+  shutdownWatchers();
   for (const socket of wsClients) {
     socket.close(1001, "Server shutting down");
   }
@@ -97,6 +99,9 @@ await app.register(diffSummaryRoutes);
 await app.register(craftingRoutes);
 
 app.get("/api/health", async () => ({ status: "ok", uptime: process.uptime() }));
+
+// Start git watchers for active sessions (detects manual commits, branch switches, etc.)
+initWatchers(getActiveSessions.all());
 
 // Serve built UI static files if available
 const __dirname = dirname(fileURLToPath(import.meta.url));
