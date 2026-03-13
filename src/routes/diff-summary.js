@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { getSession, lookupSessionId } from "../db.js";
 import { runGit, buildStatSummary, parseDiffToFiles, summarizeDiff } from "@agent-dashboard/diff-panel/server";
+import { getAnthropicFetchOptions } from "../vpn.js";
 
 // ── In-memory cache keyed on SHA-256 of diff content ────────────────────────
 const cache = new Map(); // Map<hash, { summary, model, timestamp }>
@@ -30,9 +31,12 @@ let client = null;
 
 function getClient() {
   if (!process.env.ANTHROPIC_API_KEY) return null;
-  if (!client) client = new Anthropic();
+  if (!client) client = new Anthropic({ ...getAnthropicFetchOptions() });
   return client;
 }
+
+/** Reset cached client so next call picks up new VPN/proxy config. */
+export function resetClient() { client = null; }
 
 export default async function diffSummaryRoutes(fastify) {
   // Feature availability check

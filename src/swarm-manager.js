@@ -1,5 +1,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { writeFile, unlink } from "node:fs/promises";
 import { GIT } from "./git.js";
 import { createStreamParser } from "./stream-parser.js";
 import {
@@ -23,11 +25,11 @@ const MAX_SWARM_AGENTS = parseInt(process.env.MAX_SWARM_AGENTS || "10", 10);
  * When useWorktree is true, creates a temporary git worktree so the agent
  * works on an isolated copy of the repo. The worktree is cleaned up on exit.
  *
- * @param {{ prompt: string, cwd: string, description: string, permissionMode?: string, model?: string, parentSessionId: string, useWorktree?: boolean }} opts
+ * @param {{ prompt: string, cwd: string, description: string, permissionMode?: string, model?: string, parentSessionId: string, useWorktree?: boolean, image?: { data: string, mimeType: string } }} opts
  * @param {(event: object) => void} onEvent - Called for lifecycle events
  * @returns {Promise<{ id: string, controller: AbortController }>}
  */
-export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode, model, parentSessionId, useWorktree }, onEvent) {
+export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode, model, parentSessionId, useWorktree, image }, onEvent) {
   if (activeSwarmAgents.size >= MAX_SWARM_AGENTS) {
     throw new Error(`Maximum concurrent swarm agents (${MAX_SWARM_AGENTS}) reached`);
   }
@@ -80,7 +82,26 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
     args.push("--model", model);
   }
 
-  args.push("--", prompt);
+  // If an image is attached, save as temp file and prepend a read instruction
+  let finalPrompt = prompt;
+  let imagePath = null;
+  if (image && image.data && image.mimeType) {
+    try {
+      const rawExt = image.mimeType.split("/")[1] || "png";
+      const allowedExts = ["png", "jpg", "jpeg", "gif", "webp"];
+      const ext = allowedExts.includes(rawExt) ? rawExt : "png";
+      const filename = `.dashboard-screenshot-${randomUUID().slice(0, 8)}.${ext}`;
+      imagePath = join(effectiveCwd, filename);
+      await writeFile(imagePath, Buffer.from(image.data, "base64"));
+      finalPrompt = `[Screenshot attached: ${filename}]\n\nPlease read and analyze the screenshot at "${imagePath}" before responding.\n\n${prompt}`;
+      console.log(`[swarm:${id}] Saved screenshot to ${imagePath}`);
+    } catch (err) {
+      console.error(`[swarm:${id}] Failed to save screenshot:`, err);
+      // Continue without the image rather than failing the spawn
+    }
+  }
+
+  args.push("--", finalPrompt);
 
   const proc = spawn("claude", args, {
     cwd: effectiveCwd,
@@ -118,6 +139,11 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
   proc.on("close", (code) => {
     (async () => {
       parser.flush();
+
+      // Clean up temp screenshot regardless of exit path
+      if (imagePath) {
+        unlink(imagePath).catch(() => {});
+      }
 
       // If cancelSwarmAgent() already ran, it handled cleanup — just emit done.
       if (agent.status === "cancelled") {
@@ -186,6 +212,9 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
   proc.on("error", (err) => {
     agent.status = "error";
     activeSwarmAgents.delete(id);
+    if (imagePath) {
+      unlink(imagePath).catch(() => {});
+    }
     if (worktreePath) {
       removeWorktree(cwd, worktreePath).catch(() => {});
     }

@@ -1,3 +1,4 @@
+import { getAnthropicFetchOptions } from "../vpn.js";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   getAllCraftAgents,
@@ -17,9 +18,12 @@ const SYNTHESIS_MODEL = "claude-sonnet-4-6";
 let client = null;
 function getClient() {
   if (!process.env.ANTHROPIC_API_KEY) return null;
-  if (!client) client = new Anthropic({ maxRetries: 3, timeout: 60_000 });
+  if (!client) client = new Anthropic({ maxRetries: 3, timeout: 60_000, ...getAnthropicFetchOptions() });
   return client;
 }
+
+/** Reset cached client so next call picks up new VPN/proxy config. */
+export function resetClient() { client = null; }
 
 export default async function craftingRoutes(fastify) {
   // --- AI Status ---

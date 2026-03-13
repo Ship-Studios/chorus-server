@@ -178,6 +178,41 @@ export async function configureVpn() {
 }
 
 /**
+ * Returns Bun-compatible fetchOptions for the Anthropic SDK when on VPN.
+ *
+ * Bun's native `fetch()` does NOT read HTTP_PROXY/HTTPS_PROXY env vars,
+ * and NODE_EXTRA_CA_CERTS only takes effect at process startup — not when
+ * set at runtime by configureVpn(). This function provides the proxy URL
+ * and corporate CA certificate directly as Bun fetch options.
+ *
+ * Usage:
+ *   new Anthropic({ ...getAnthropicFetchOptions() })
+ *
+ * Off-VPN: returns `{}` (no-op spread).
+ * On-VPN:  returns `{ fetchOptions: { proxy, tls: { ca } } }`.
+ *
+ * @returns {object} Options to spread into the Anthropic constructor
+ */
+export function getAnthropicFetchOptions() {
+  if (!vpnState.detected) return {};
+
+  /** @type {Record<string, any>} */
+  const fetchOptions = { proxy: PROXY_URL };
+
+  // Load the corporate CA cert so Bun's TLS trusts the proxy's interception cert
+  if (vpnState.certPath && vpnState.certValid) {
+    try {
+      const ca = readFileSync(vpnState.certPath, "utf-8");
+      fetchOptions.tls = { ca };
+    } catch {
+      // cert file unreadable — fall through without tls override
+    }
+  }
+
+  return { fetchOptions };
+}
+
+/**
  * Re-detect VPN and reconfigure environment (for mid-session toggling).
  * Same logic as `configureVpn` but always runs live detection (ignores FORCE_ vars).
  */
