@@ -35,7 +35,6 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
     const args = [
       "--print",
       "--output-format", "stream-json",
-      "--max-turns", "25",
       "--verbose",
     ];
 

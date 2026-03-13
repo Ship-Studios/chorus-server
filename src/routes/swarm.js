@@ -11,7 +11,7 @@ import { spawnSwarmAgent, cancelSwarmAgent, getActiveSwarmAgents } from "../prom
 
 export default async function swarmRoutes(fastify) {
   fastify.post("/api/sessions/:sessionId/swarm/spawn", async (req, reply) => {
-    const { prompt, description, permissionMode, maxTurns, model, useWorktree } = req.body ?? {};
+    const { prompt, description, permissionMode, model, useWorktree } = req.body ?? {};
     if (!prompt) return reply.code(400).send({ error: "prompt is required" });
 
     const sessionId = lookupSessionId(req.params.sessionId);
@@ -28,7 +28,7 @@ export default async function swarmRoutes(fastify) {
     let agentId;
     try {
       ({ id: agentId } = await spawnSwarmAgent(
-        { prompt, cwd: baseCwd, description: agentDescription, permissionMode, maxTurns, model, parentSessionId: sessionId, useWorktree: !!useWorktree },
+        { prompt, cwd: baseCwd, description: agentDescription, permissionMode, model, parentSessionId: sessionId, useWorktree: !!useWorktree },
         (event) => {
           // When a worktree agent finishes, persist the record to DB
           if (event.type === "swarm:done" && event.worktree) {

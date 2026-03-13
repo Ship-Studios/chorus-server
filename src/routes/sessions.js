@@ -9,10 +9,31 @@ import {
   deleteSession,
   insertAlias,
 } from "../db.js";
-import { isPromptActive, cancelPrompt, getActiveSwarmAgents, hasActiveSwarmAgents } from "../prompt.js";
+import { isPromptActive, cancelPrompt, getActiveSwarmAgents, hasActiveSwarmAgents, cancelSwarmAgent } from "../prompt.js";
 import { startWatching, stopWatching } from "../git-watcher.js";
 
+/**
+ * Session lifecycle routes — registration, heartbeat, stop, list, and deletion.
+ *
+ * Sessions are the central identity concept in the dashboard. A single dashboard
+ * session may aggregate multiple Claude CLI invocations (reconnects, resumes) for
+ * the same project via the alias resolution system in session-resolver.js.
+ *
+ * @param {import("fastify").FastifyInstance} fastify
+ */
 export default async function sessionRoutes(fastify) {
+  /**
+   * Register or heartbeat a session.
+   *
+   * Called by the SessionStart hook on every Claude CLI invocation. Uses
+   * resolveSessionId() to merge multiple CLI sessions for the same project
+   * into one dashboard session. Swarm agents (identified by body.agentId)
+   * bypass alias resolution to keep their own isolated session.
+   *
+   * Also detects worktree sessions (project_dir mismatch with existing session)
+   * and stores the worktree path separately so diffs always run against the
+   * main project directory.
+   */
   fastify.post("/api/sessions", async (req, reply) => {
     const body = req.body ?? {};
     const claudeSessionId = body.sessionId;
@@ -79,6 +100,13 @@ export default async function sessionRoutes(fastify) {
     return { ok: true };
   });
 
+  /**
+   * Mark a session as stopped.
+   *
+   * Called by the Stop HTTP hook when Claude CLI exits. Intentionally ignores
+   * stop signals while a prompt subprocess is active — the subprocess exit
+   * fires its own Stop hook, but the parent session is still alive.
+   */
   fastify.post("/api/sessions/:sessionId/stop", {
     config: { rawBody: true },
     handler: async (req, reply) => {
@@ -100,23 +128,43 @@ export default async function sessionRoutes(fastify) {
     },
   });
 
+  /** List the 50 most recent sessions, ordered by last_seen_at descending. */
   fastify.get("/api/sessions", async () => getAllSessions.all());
 
+  /**
+   * Force-delete a session and all associated data.
+   *
+   * Unlike the stop endpoint, this performs a full teardown: cancels any
+   * running prompt or swarm agents, stops the git file watcher, marks the
+   * session as stopped, then cascades deletion through events, agents,
+   * aliases, worktrees, and the session row itself.
+   *
+   * Active sessions are allowed — the hook-based stop signal is best-effort
+   * and may never arrive (crash, kill -9, network failure), so the UI must
+   * be able to clean up zombie sessions.
+   */
   fastify.delete("/api/sessions/:sessionId", async (req, reply) => {
     const sessionId = lookupSessionId(req.params.sessionId);
     const session = getSession.get({ $id: sessionId });
-    if (!session || session.status === "active") {
-      return reply.code(400).send({ error: "Session not found or still active" });
+    if (!session) {
+      return reply.code(404).send({ error: "Session not found" });
     }
-    if (hasActiveSwarmAgents(sessionId)) {
-      return reply.code(400).send({ error: "Session has active swarm agents" });
-    }
-    // Stop git watcher and cancel any active prompt before deletion
+
+    // Force-stop active resources before deletion
     stopWatching(sessionId, session.worktree_dir || session.project_dir);
     cancelPrompt(sessionId);
+    for (const agent of getActiveSwarmAgents(sessionId)) {
+      cancelSwarmAgent(agent.id);
+    }
+
+    // Mark stopped so deleteSession() allows the DB cascade
+    if (session.status === "active") {
+      updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
+    }
+
     const deleted = deleteSession(sessionId);
     if (!deleted) {
-      return reply.code(400).send({ error: "Session not found or still active" });
+      return reply.code(500).send({ error: "Failed to delete session" });
     }
 
     broadcast({ type: "session:deleted", sessionId });

@@ -124,7 +124,7 @@ beforeAll(async () => {
   // ─── POST /api/sessions/:sessionId/swarm/spawn ───────────────────────────
 
   app.post("/api/sessions/:sessionId/swarm/spawn", async (req, reply) => {
-    const { prompt, description, permissionMode, maxTurns, model, useWorktree } = req.body ?? {};
+    const { prompt, description, permissionMode, model, useWorktree } = req.body ?? {};
     if (!prompt) return reply.code(400).send({ error: "prompt is required" });
 
     const sessionId = lookupSessionId(req.params.sessionId);
@@ -139,7 +139,7 @@ beforeAll(async () => {
     const agentDescription = description || prompt.slice(0, 80);
 
     const { id: agentId } = await mockSpawnSwarmAgent(
-      { prompt, cwd: baseCwd, description: agentDescription, permissionMode, maxTurns, model, parentSessionId: sessionId, useWorktree: !!useWorktree },
+      { prompt, cwd: baseCwd, description: agentDescription, permissionMode, model, parentSessionId: sessionId, useWorktree: !!useWorktree },
       (event) => {
         mockBroadcast({ ...event, parentSessionId: sessionId });
       },
@@ -239,11 +239,10 @@ describe("POST /api/sessions/:sessionId/swarm/spawn", () => {
     await app.inject({
       method: "POST",
       url: "/api/sessions/swarm-session/swarm/spawn",
-      payload: { prompt: "go", permissionMode: "acceptEdits", maxTurns: 10, model: "opus", useWorktree: true },
+      payload: { prompt: "go", permissionMode: "acceptEdits", model: "opus", useWorktree: true },
     });
     const call = mockSpawnCalls[0];
     expect(call.permissionMode).toBe("acceptEdits");
-    expect(call.maxTurns).toBe(10);
     expect(call.model).toBe("opus");
     expect(call.useWorktree).toBe(true);
     expect(call.parentSessionId).toBe("swarm-session");

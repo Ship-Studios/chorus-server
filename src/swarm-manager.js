@@ -23,11 +23,11 @@ const MAX_SWARM_AGENTS = parseInt(process.env.MAX_SWARM_AGENTS || "10", 10);
  * When useWorktree is true, creates a temporary git worktree so the agent
  * works on an isolated copy of the repo. The worktree is cleaned up on exit.
  *
- * @param {{ prompt: string, cwd: string, description: string, permissionMode?: string, maxTurns?: number, model?: string, parentSessionId: string, useWorktree?: boolean }} opts
+ * @param {{ prompt: string, cwd: string, description: string, permissionMode?: string, model?: string, parentSessionId: string, useWorktree?: boolean }} opts
  * @param {(event: object) => void} onEvent - Called for lifecycle events
  * @returns {Promise<{ id: string, controller: AbortController }>}
  */
-export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode, maxTurns, model, parentSessionId, useWorktree }, onEvent) {
+export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode, model, parentSessionId, useWorktree }, onEvent) {
   if (activeSwarmAgents.size >= MAX_SWARM_AGENTS) {
     throw new Error(`Maximum concurrent swarm agents (${MAX_SWARM_AGENTS}) reached`);
   }
@@ -63,7 +63,6 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
   const args = [
     "--print",
     "--output-format", "stream-json",
-    "--max-turns", String(maxTurns ?? 25),
     "--verbose",
   ];
 
