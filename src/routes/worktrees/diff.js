@@ -25,10 +25,23 @@ export default async function worktreeDiffRoutes(fastify) {
     }
 
     try {
+      const MAX_FILES_DEFAULT = 200;
+      const maxFiles = Math.min(Number(req.query.maxFiles) || MAX_FILES_DEFAULT, 500);
       const range = `${wt.base_branch}...${wt.branch_name}`;
       const diff = await runGit(dir, ["diff", "--no-color", "--unified=5", "--submodule=diff", range]);
-      const files = parseDiffToFiles(diff);
-      return { worktreeId: wt.id, branchName: wt.branch_name, baseBranch: wt.base_branch, stat: buildStatSummary(files), diff, files };
+      const allFiles = parseDiffToFiles(diff);
+      const truncated = allFiles.length > maxFiles;
+      const files = truncated ? allFiles.slice(0, maxFiles) : allFiles;
+      return {
+        worktreeId: wt.id,
+        branchName: wt.branch_name,
+        baseBranch: wt.base_branch,
+        stat: buildStatSummary(allFiles),
+        diff: "",
+        files,
+        totalFiles: allFiles.length,
+        truncated,
+      };
     } catch (err) {
       return reply.code(500).send({ error: `Git error: ${err.message}` });
     }

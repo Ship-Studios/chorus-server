@@ -62,7 +62,16 @@ export default async function sessionRoutes(fastify) {
     const isWorktree =
       existingSession &&
       existingSession.project_dir !== projectDir &&
-      projectDir !== "unknown";
+      projectDir !== "unknown" &&
+      // A subdirectory of project_dir is a submodule invocation, not a worktree.
+      // Setting worktree_dir to a subdir would permanently misdirect diffs.
+      !projectDir.startsWith(existingSession.project_dir + "/");
+
+    // Clear stale worktree_dir when a non-worktree heartbeat arrives for a
+    // session that previously had worktree_dir set (e.g., from a submodule
+    // invocation that slipped through before this guard existed).
+    const shouldClearWorktree =
+      existingSession && !isWorktree && existingSession.worktree_dir;
 
     // Don't overwrite current_claude_session_id when a prompt subprocess is running
     const hasActivePrompt = isPromptActive(sessionId);
@@ -70,7 +79,11 @@ export default async function sessionRoutes(fastify) {
     upsertSession.run({
       $id: sessionId,
       $projectDir: isWorktree ? existingSession.project_dir : projectDir,
-      $worktreeDir: isWorktree ? projectDir : (body.worktreeDir ?? null),
+      $worktreeDir: isWorktree
+        ? projectDir
+        : shouldClearWorktree
+          ? "__clear__"
+          : (body.worktreeDir ?? null),
       $status: "active",
       $model: body.model || null,
       $currentClaudeSessionId: hasActivePrompt ? null : claudeSessionId,

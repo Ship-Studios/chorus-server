@@ -1,7 +1,7 @@
 import chokidar from "chokidar";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { broadcast } from "./broadcast.js";
+import { debouncedDiffInvalidation } from "./broadcast.js";
 
 /** @type {Map<string, { watcher: import("chokidar").FSWatcher, sessionIds: Set<string>, debounceTimer: ReturnType<typeof setTimeout> | null }>} */
 const watchers = new Map();
@@ -42,7 +42,7 @@ export function startWatching(sessionId, projectDir) {
     entry.debounceTimer = setTimeout(() => {
       entry.debounceTimer = null;
       for (const sid of entry.sessionIds) {
-        broadcast({ type: "diff:invalidated", sessionId: sid });
+        debouncedDiffInvalidation(sid);
       }
     }, 300);
   });

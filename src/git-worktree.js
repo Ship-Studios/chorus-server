@@ -142,7 +142,9 @@ export function getBranchDiffStats(repoDir, baseBranch, headBranch) {
     }
 
     return { filesChanged, insertions, deletions, diffStat: stat };
-  } catch {
+  } catch (err) {
+    const msg = err.stderr?.toString?.().trim() || err.message || String(err);
+    console.error(`[worktree] getBranchDiffStats failed for ${baseBranch}...${headBranch} in ${repoDir}: ${msg}`);
     return { filesChanged: 0, insertions: 0, deletions: 0, diffStat: "" };
   }
 }

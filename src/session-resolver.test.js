@@ -81,7 +81,10 @@ function createTestDb() {
             THEN $projectDir
           ELSE sessions.project_dir
         END,
-        worktree_dir = COALESCE($worktreeDir, sessions.worktree_dir),
+        worktree_dir = CASE
+          WHEN $worktreeDir = '__clear__' THEN NULL
+          ELSE COALESCE($worktreeDir, sessions.worktree_dir)
+        END,
         current_claude_session_id = COALESCE($currentClaudeSessionId, sessions.current_claude_session_id),
         last_seen_at = datetime('now')
     `),
@@ -346,5 +349,147 @@ describe("deduplicateSessions", () => {
 
     const merged = t.deduplicateSessions();
     expect(merged).toBe(0);
+  });
+});
+
+// ─── Subdirectory guard and worktree_dir clearing ─────────────────────────────
+
+describe("subdirectory guard and worktree_dir clearing", () => {
+  let t;
+  beforeEach(() => { t = createTestDb(); });
+
+  /**
+   * Simulates the isWorktree logic from sessions.js.
+   * This is the production code we're testing:
+   *
+   * const isWorktree =
+   *   existingSession &&
+   *   existingSession.project_dir !== projectDir &&
+   *   projectDir !== "unknown" &&
+   *   !projectDir.startsWith(existingSession.project_dir + "/");
+   */
+  function simulateSessionRegistration(t, { sessionId, projectDir, existingSessionId }) {
+    const existingSession = existingSessionId
+      ? t.getSession.get({ $id: existingSessionId })
+      : null;
+
+    const isWorktree =
+      existingSession &&
+      existingSession.project_dir !== projectDir &&
+      projectDir !== "unknown" &&
+      !projectDir.startsWith(existingSession.project_dir + "/");
+
+    const shouldClearWorktree =
+      existingSession && !isWorktree && existingSession.worktree_dir;
+
+    t.upsertSession.run({
+      $id: existingSessionId || sessionId,
+      $projectDir: isWorktree ? existingSession.project_dir : projectDir,
+      $worktreeDir: isWorktree
+        ? projectDir
+        : shouldClearWorktree
+          ? "__clear__"
+          : null,
+      $status: "active",
+      $model: null,
+      $currentClaudeSessionId: null,
+    });
+
+    return { isWorktree, shouldClearWorktree };
+  }
+
+  it("does NOT set worktree_dir for subdirectory of project_dir (submodule)", () => {
+    // Create parent session
+    t.upsertSession.run({
+      $id: "dash-1", $projectDir: "/home/user/project", $worktreeDir: null,
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+
+    // Simulate a hook from inside a submodule
+    const result = simulateSessionRegistration(t, {
+      sessionId: "cli-2",
+      projectDir: "/home/user/project/packages/submodule",
+      existingSessionId: "dash-1",
+    });
+
+    expect(result.isWorktree).toBe(false);
+    const session = t.getSession.get({ $id: "dash-1" });
+    expect(session.worktree_dir).toBeNull();
+    expect(session.project_dir).toBe("/home/user/project");
+  });
+
+  it("DOES set worktree_dir for external worktree (different path)", () => {
+    t.upsertSession.run({
+      $id: "dash-1", $projectDir: "/home/user/project", $worktreeDir: null,
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+
+    const result = simulateSessionRegistration(t, {
+      sessionId: "cli-2",
+      projectDir: "/tmp/worktrees/feature-branch",
+      existingSessionId: "dash-1",
+    });
+
+    expect(result.isWorktree).toBe(true);
+    const session = t.getSession.get({ $id: "dash-1" });
+    expect(session.worktree_dir).toBe("/tmp/worktrees/feature-branch");
+  });
+
+  it("clears stale worktree_dir on non-worktree heartbeat", () => {
+    // Session with stale worktree_dir from a previous submodule aliasing
+    t.upsertSession.run({
+      $id: "dash-1", $projectDir: "/home/user/project",
+      $worktreeDir: "/home/user/project/packages/stale-submodule",
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+
+    // Normal heartbeat from the correct project_dir
+    const result = simulateSessionRegistration(t, {
+      sessionId: "cli-2",
+      projectDir: "/home/user/project",
+      existingSessionId: "dash-1",
+    });
+
+    expect(result.isWorktree).toBe(false);
+    expect(result.shouldClearWorktree).toBeTruthy();
+    const session = t.getSession.get({ $id: "dash-1" });
+    expect(session.worktree_dir).toBeNull();
+  });
+
+  it("does not clear worktree_dir if session has no existing worktree_dir", () => {
+    t.upsertSession.run({
+      $id: "dash-1", $projectDir: "/home/user/project", $worktreeDir: null,
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+
+    const result = simulateSessionRegistration(t, {
+      sessionId: "cli-2",
+      projectDir: "/home/user/project",
+      existingSessionId: "dash-1",
+    });
+
+    expect(result.shouldClearWorktree).toBeFalsy();
+    const session = t.getSession.get({ $id: "dash-1" });
+    expect(session.worktree_dir).toBeNull();
+  });
+
+  it("preserves worktree_dir for legitimate external worktree sessions", () => {
+    // Session with a legitimate worktree_dir
+    t.upsertSession.run({
+      $id: "dash-1", $projectDir: "/home/user/project",
+      $worktreeDir: "/tmp/worktrees/feature-branch",
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+
+    // Another worktree session arrives — overwrites with new worktree
+    const result = simulateSessionRegistration(t, {
+      sessionId: "cli-3",
+      projectDir: "/tmp/worktrees/another-branch",
+      existingSessionId: "dash-1",
+    });
+
+    expect(result.isWorktree).toBe(true);
+    const session = t.getSession.get({ $id: "dash-1" });
+    expect(session.worktree_dir).toBe("/tmp/worktrees/another-branch");
   });
 });

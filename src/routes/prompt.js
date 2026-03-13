@@ -27,7 +27,7 @@
 import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { broadcast } from "../broadcast.js";
+import { broadcast, debouncedDiffInvalidation } from "../broadcast.js";
 import { getSession, lookupSessionId } from "../db.js";
 import { sendPrompt, cancelPrompt, isPromptActive } from "../prompt.js";
 
@@ -81,7 +81,7 @@ export default async function promptRoutes(fastify) {
         (result) => {
           broadcast({ type: "prompt:done", sessionId, exitCode: result.code, cancelled: result.cancelled, error: result.error, freshSession: result.freshSession || false });
           // Prompt may have modified files — signal diff refresh
-          broadcast({ type: "diff:invalidated", sessionId });
+          debouncedDiffInvalidation(sessionId);
           // Clean up the temp screenshot file once the prompt is done
           if (imagePath) {
             unlink(imagePath).catch(() => {});
@@ -90,7 +90,7 @@ export default async function promptRoutes(fastify) {
       );
     } catch (err) {
       broadcast({ type: "prompt:done", sessionId, exitCode: null, error: err.message });
-      broadcast({ type: "diff:invalidated", sessionId });
+      debouncedDiffInvalidation(sessionId);
       return reply.code(500).send({ error: err.message });
     }
 

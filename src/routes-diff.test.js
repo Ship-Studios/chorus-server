@@ -246,3 +246,59 @@ describe("GET /api/sessions/:sessionId/diff", () => {
     expect(body.diff).not.toContain("const y = 2");
   });
 });
+
+describe("worktree_dir contamination prevention", () => {
+  it("returns project_dir when worktree_dir is null", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/sessions/diff-session/diff" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().directory).toBe(TEMP_REPO);
+  });
+
+  it("returns worktree_dir when set (legitimate worktree)", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/sessions/worktree-session/diff" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().directory).toBe(TEMP_WORKTREE);
+  });
+
+  it("stale worktree_dir pointing to subdir would misdirect diff", async () => {
+    // Simulate the bug: worktree_dir set to a subdirectory of project_dir
+    // This is a submodule path that should never be used as worktree_dir
+    const subDir = TEMP_REPO; // Use same dir since we can't create actual submodule here
+    db.prepare("UPDATE sessions SET worktree_dir = $wt WHERE id = $id").run({
+      $wt: subDir,
+      $id: "diff-session",
+    });
+
+    const res = await app.inject({ method: "GET", url: "/api/sessions/diff-session/diff" });
+    expect(res.statusCode).toBe(200);
+    // Directory is worktree_dir (the "contaminated" value)
+    expect(res.json().directory).toBe(subDir);
+
+    // Clean up: reset worktree_dir
+    db.prepare("UPDATE sessions SET worktree_dir = NULL WHERE id = $id").run({
+      $id: "diff-session",
+    });
+  });
+
+  it("diff uses project_dir after worktree_dir is cleared", async () => {
+    // First set a stale worktree_dir
+    db.prepare("UPDATE sessions SET worktree_dir = $wt WHERE id = $id").run({
+      $wt: "/some/stale/path",
+      $id: "diff-session",
+    });
+
+    // Verify it would use the stale path (which doesn't exist)
+    let res = await app.inject({ method: "GET", url: "/api/sessions/diff-session/diff" });
+    expect(res.statusCode).toBe(400); // stale path doesn't exist
+
+    // Clear the worktree_dir (simulating the __clear__ fix)
+    db.prepare("UPDATE sessions SET worktree_dir = NULL WHERE id = $id").run({
+      $id: "diff-session",
+    });
+
+    // Now diff should use project_dir and succeed
+    res = await app.inject({ method: "GET", url: "/api/sessions/diff-session/diff" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().directory).toBe(TEMP_REPO);
+  });
+});

@@ -90,7 +90,10 @@ function createTestDb() {
             THEN $projectDir
           ELSE sessions.project_dir
         END,
-        worktree_dir = COALESCE($worktreeDir, sessions.worktree_dir),
+        worktree_dir = CASE
+          WHEN $worktreeDir = '__clear__' THEN NULL
+          ELSE COALESCE($worktreeDir, sessions.worktree_dir)
+        END,
         current_claude_session_id = COALESCE($currentClaudeSessionId, sessions.current_claude_session_id),
         last_seen_at = datetime('now')
     `),
@@ -565,5 +568,70 @@ describe("worktree constraints", () => {
 
     expect(t.getSessionWorktrees.all({ $sessionId: "s1" })).toHaveLength(1);
     expect(t.getSessionWorktrees.all({ $sessionId: "s2" })).toHaveLength(1);
+  });
+});
+
+// ─── worktree_dir __clear__ sentinel ──────────────────────────────────────────
+
+describe("upsertSession worktree_dir clearing", () => {
+  let t;
+  beforeEach(() => { t = createTestDb(); });
+
+  it("clears worktree_dir when __clear__ sentinel is passed", () => {
+    t.upsertSession.run({
+      $id: "s1", $projectDir: "/project/root", $worktreeDir: "/stale/worktree",
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/stale/worktree");
+
+    t.upsertSession.run({
+      $id: "s1", $projectDir: "/project/root", $worktreeDir: "__clear__",
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBeNull();
+  });
+
+  it("preserves worktree_dir when null is passed (COALESCE behavior)", () => {
+    t.upsertSession.run({
+      $id: "s1", $projectDir: "/p", $worktreeDir: "/existing/wt",
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    t.upsertSession.run({
+      $id: "s1", $projectDir: "/p", $worktreeDir: null,
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/existing/wt");
+  });
+
+  it("sets worktree_dir when a real path is passed", () => {
+    t.upsertSession.run({
+      $id: "s1", $projectDir: "/p", $worktreeDir: null,
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    t.upsertSession.run({
+      $id: "s1", $projectDir: "/p", $worktreeDir: "/new/worktree",
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/new/worktree");
+  });
+
+  it("can re-set worktree_dir after clearing", () => {
+    t.upsertSession.run({
+      $id: "s1", $projectDir: "/p", $worktreeDir: "/old",
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    // Clear
+    t.upsertSession.run({
+      $id: "s1", $projectDir: "/p", $worktreeDir: "__clear__",
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBeNull();
+
+    // Re-set
+    t.upsertSession.run({
+      $id: "s1", $projectDir: "/p", $worktreeDir: "/new",
+      $status: "active", $model: null, $currentClaudeSessionId: null,
+    });
+    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/new");
   });
 });

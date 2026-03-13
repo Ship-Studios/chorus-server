@@ -18,7 +18,7 @@
  * @see {@link ../git-worktree.js} for git worktree create/remove/diff utilities
  */
 
-import { broadcast } from "../broadcast.js";
+import { broadcast, debouncedDiffInvalidation } from "../broadcast.js";
 import {
   getSession,
   lookupSessionId,
@@ -126,13 +126,13 @@ export default async function swarmRoutes(fastify) {
             // already carries the full record; clients don't need the raw stats twice.
             const { worktree: _discard, ...eventWithoutWorktree } = event;
             broadcast({ ...eventWithoutWorktree, parentSessionId: sessionId });
-            broadcast({ type: "diff:invalidated", sessionId });
+            debouncedDiffInvalidation(sessionId);
             return; // Don't fall through to the generic broadcast
           }
 
           // Swarm agent completed — may have modified files
           if (event.type === "swarm:done") {
-            broadcast({ type: "diff:invalidated", sessionId });
+            debouncedDiffInvalidation(sessionId);
           }
           broadcast({ ...event, parentSessionId: sessionId });
         },

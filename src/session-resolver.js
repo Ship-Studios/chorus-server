@@ -22,7 +22,23 @@ import {
  */
 function resolveGitRoot(dir) {
   try {
-    // --show-superproject-working-tree returns empty for non-worktrees,
+    // Check if dir is inside a git submodule FIRST, before worktree list.
+    // `git worktree list` inside a submodule returns the gitdir path
+    // (.git/modules/...), not the working tree — and calling
+    // --show-superproject-working-tree from a gitdir returns empty.
+    // So we must check from the original working tree dir.
+    try {
+      const superproject = execFileSync(
+        GIT,
+        ["rev-parse", "--show-superproject-working-tree"],
+        { cwd: dir, encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] },
+      ).trim();
+      if (superproject) return superproject;
+    } catch {
+      // Not a submodule — continue with normal worktree resolution
+    }
+
+    // --show-superproject-working-tree returns empty for non-submodules,
     // so we use worktree list which always shows the main tree first.
     const output = execFileSync(GIT, ["worktree", "list", "--porcelain"], {
       cwd: dir,

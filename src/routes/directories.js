@@ -7,7 +7,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const CODE_DIR = join(homedir(), "Documents", "code");
+const CODE_DIR = process.env.PULSE_ROOT_DIR || join(homedir(), "Documents", "code");
 
 export default async function directoryRoutes(fastify) {
   fastify.get("/api/directories", async (_req, reply) => {

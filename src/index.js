@@ -49,7 +49,7 @@ import { fileURLToPath } from "node:url";
  * - `broadcast(msg)`: Serializes and sends to all connected clients.
  *   Terminates slow clients whose send buffer exceeds 1MB.
  */
-import { wsClients, broadcast } from "./broadcast.js";
+import { wsClients, broadcast, clearDiffTimers } from "./broadcast.js";
 
 /**
  * Database access — prepared statements and session management.
@@ -57,7 +57,7 @@ import { wsClients, broadcast } from "./broadcast.js";
  * Uses `bun:sqlite` in WAL mode with `$paramName` binding syntax.
  * `deduplicateSessions()` cleans up TOCTOU race duplicates from `resolveSessionId()`.
  */
-import { getAllSessions, getActiveSessions, getRecentEvents, getRecentAgents, getAllActiveWorktrees, deduplicateSessions } from "./db.js";
+import { getAllSessions, getActiveSessions, getRecentEventsSlim, getRecentAgentsSlim, getAllActiveWorktrees, deduplicateSessions } from "./db.js";
 
 /**
  * Git directory watchers (chokidar).
@@ -192,8 +192,8 @@ app.register(async (fastify) => {
       socket.send(JSON.stringify({
         type: "init",
         sessions: getAllSessions.all(),
-        recentEvents: getRecentEvents.all(),
-        agents: getRecentAgents.all(),
+        recentEvents: getRecentEventsSlim.all(),
+        agents: getRecentAgentsSlim.all(),
         worktrees: getAllActiveWorktrees.all(),
       }));
     } catch (err) {
@@ -240,12 +240,19 @@ const heartbeatInterval = setInterval(() => {
  */
 app.addHook("onClose", () => {
   clearInterval(heartbeatInterval);
+  clearDiffTimers();
   shutdownWatchers();
   for (const socket of wsClients) {
     socket.close(1001, "Server shutting down");
   }
   wsClients.clear();
 });
+
+// Graceful shutdown on signals — ensures onClose hook fires, cleaning up
+// heartbeat timer, diff debounce timers, git watchers, and WS connections.
+for (const sig of ["SIGTERM", "SIGINT"]) {
+  process.on(sig, () => app.close());
+}
 
 // ---------------------------------------------------------------------------
 // Route plugin registration

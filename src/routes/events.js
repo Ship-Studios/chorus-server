@@ -31,7 +31,7 @@
  *
  * @module routes/events
  */
-import { broadcast } from "../broadcast.js";
+import { broadcast, debouncedDiffInvalidation } from "../broadcast.js";
 import {
   upsertSession,
   insertEvent,
@@ -93,7 +93,7 @@ export default async function eventRoutes(fastify) {
     // Signal diff invalidation for file-modifying tools (only if tool succeeded)
     const isWriteOp = body.toolName === "Edit" || body.toolName === "Write" || body.toolName === "Bash" || body.toolName === "MultiEdit";
     if (isWriteOp && body.toolSuccess !== false) {
-      broadcast({ type: "diff:invalidated", sessionId });
+      debouncedDiffInvalidation(sessionId);
     }
 
     // Auto-detect Agent tool calls and create agent records
@@ -219,7 +219,7 @@ export default async function eventRoutes(fastify) {
     // Diff invalidation for write-ops (PostToolUse only fires on success)
     const isWriteOp = toolName === "Edit" || toolName === "Write" || toolName === "Bash" || toolName === "MultiEdit";
     if (isWriteOp) {
-      broadcast({ type: "diff:invalidated", sessionId });
+      debouncedDiffInvalidation(sessionId);
     }
 
     // Auto-detect Agent tool calls

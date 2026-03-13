@@ -68,6 +68,7 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_agents_session ON agents(session_id);
+  CREATE INDEX IF NOT EXISTS idx_agents_session_created ON agents(session_id, created_at DESC);
 
   -- Tracks worktree branches created by swarm agents for PR-like review.
   -- Each row represents a named branch with its diff against a base branch.
@@ -90,6 +91,7 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_worktrees_session ON worktrees(session_id);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(session_id, branch_name);
+  CREATE INDEX IF NOT EXISTS idx_sessions_project_status ON sessions(project_dir, status);
 
   -- Crafting workbench tables (agent composition UI)
   CREATE TABLE IF NOT EXISTS craft_agents (
@@ -139,7 +141,10 @@ export const upsertSession = db.prepare(`
         THEN $projectDir
       ELSE sessions.project_dir
     END,
-    worktree_dir = COALESCE($worktreeDir, sessions.worktree_dir),
+    worktree_dir = CASE
+      WHEN $worktreeDir = '__clear__' THEN NULL
+      ELSE COALESCE($worktreeDir, sessions.worktree_dir)
+    END,
     current_claude_session_id = COALESCE($currentClaudeSessionId, sessions.current_claude_session_id),
     last_seen_at = datetime('now')
 `);
@@ -176,6 +181,15 @@ export const getSessionEvents = db.prepare(`
 
 export const getRecentEvents = db.prepare(`
   SELECT e.*, s.project_dir FROM events e
+  JOIN sessions s ON e.session_id = s.id
+  ORDER BY e.created_at DESC LIMIT 100
+`);
+
+/** Slim version for WS init — excludes payload column to avoid multi-MB init messages. */
+export const getRecentEventsSlim = db.prepare(`
+  SELECT e.id, e.session_id, e.type, e.tool_name, e.file_path, e.summary,
+         e.payload IS NOT NULL AS hasPayload, e.created_at, s.project_dir
+  FROM events e
   JOIN sessions s ON e.session_id = s.id
   ORDER BY e.created_at DESC LIMIT 100
 `);
@@ -241,6 +255,12 @@ export const getSessionWorktrees = db.prepare(`
 `);
 
 export const getRecentAgents = db.prepare(`SELECT * FROM agents ORDER BY created_at DESC LIMIT 500`);
+
+/** Slim version for WS init — excludes prompt column to reduce payload by ~1MB. */
+export const getRecentAgentsSlim = db.prepare(`
+  SELECT id, session_id, event_id, description, agent_type, status, created_at
+  FROM agents ORDER BY created_at DESC LIMIT 500
+`);
 export const getAllActiveWorktrees = db.prepare(`SELECT * FROM worktrees WHERE status IN ('pending', 'ready') ORDER BY created_at DESC`);
 
 export const deleteWorktreeRow = db.prepare(`

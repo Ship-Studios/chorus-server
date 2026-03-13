@@ -3,6 +3,29 @@ export const wsClients = new Set();
 
 const MAX_BUFFER = 1 * 1024 * 1024;
 
+// --- Debounced diff invalidation ---
+// Multiple sources fire diff:invalidated for the same underlying change (hook,
+// git-watcher, prompt:done). Coalesce per-session with a 300ms trailing-edge
+// debounce so the UI receives at most one signal per burst.
+const diffTimers = new Map();
+
+export function debouncedDiffInvalidation(sessionId) {
+  if (diffTimers.has(sessionId)) return; // already scheduled
+  diffTimers.set(
+    sessionId,
+    setTimeout(() => {
+      diffTimers.delete(sessionId);
+      broadcast({ type: "diff:invalidated", sessionId });
+    }, 300),
+  );
+}
+
+/** Cancel all pending diff debounce timers (used during shutdown). */
+export function clearDiffTimers() {
+  for (const timer of diffTimers.values()) clearTimeout(timer);
+  diffTimers.clear();
+}
+
 export function broadcast(message) {
   let data;
   try {

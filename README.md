@@ -1,48 +1,30 @@
 # @agent-dashboard/server
 
-Fastify 5 backend for the Agent Dashboard. Receives Claude Code hook events, persists them to SQLite, and streams real-time updates to dashboard clients over WebSocket.
-
-## Installation
-
-This package is part of the `agent-dashboard` monorepo. Install from the repo root:
-
-```bash
-bun install
-```
+Fastify 5 API server for the Agent Dashboard. Receives Claude Code lifecycle hook events, persists them to SQLite, and broadcasts real-time updates to dashboard clients over WebSocket.
 
 ## Usage
 
 ```bash
-# Development (hot reload)
+# Dev (hot reload)
 bun --watch src/index.js
 
-# Production (via monorepo root)
-bun run start
+# Production (started automatically by bin/dashboard.js / pulse CLI)
+bun src/index.js
 ```
 
-The server starts on `http://localhost:3001` by default.
-
-## Environment Variables
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `PORT` | `3001` | Listen port |
-| `HOST` | `127.0.0.1` | Listen host |
-| `ANTHROPIC_API_KEY` | — | Required for diff summary and crafting synthesis |
-| `DASHBOARD_API_KEY` | — | Optional: guards non-GET `/api` routes |
-| `MAX_SWARM_AGENTS` | `10` | Max concurrent swarm agent processes |
+The server listens on `http://127.0.0.1:3001` by default. Override with `PORT` and `HOST` environment variables.
 
 ## API
 
-See the [root CLAUDE.md](../../CLAUDE.md) for full endpoint documentation. Summary:
+All REST endpoints are documented in the [root CLAUDE.md](../../CLAUDE.md). Key groups:
 
-- **Hook endpoints** — `POST /api/sessions`, `POST /api/events`, `POST /api/sessions/:id/stop`
-- **Query endpoints** — `GET /api/sessions`, `GET /api/sessions/:id/events`, `GET /api/sessions/:id/diff`
-- **Prompt control** — `POST /api/sessions/:id/prompt`, cancel, status
-- **Swarm agents** — `POST /api/sessions/:id/swarm/spawn`, cancel, list
-- **Worktree review** — diff, files, merge, discard, conflict check
-- **Crafting workbench** — agents and recipes CRUD, AI synthesis
-- **WebSocket** — `WS /ws` streams `init`, `event:new`, `session:updated`, `prompt:chunk`, `swarm:*`, `worktree:*`
+- **Hook endpoints** -- `POST /api/sessions`, `POST /api/hooks/*` -- called by Claude Code bash and HTTP hooks
+- **Session/event queries** -- `GET /api/sessions`, `GET /api/events`, `GET /api/sessions/:id/diff`
+- **Prompt control** -- `POST /api/sessions/:id/prompt{,/cancel,/status}` -- streams `claude --resume` output
+- **Swarm agents** -- `POST /api/sessions/:id/swarm/spawn`, `POST /api/swarm/:id/cancel`
+- **Worktrees** -- `GET/POST/DELETE /api/worktrees/*` -- git branch review flow
+- **AI features** -- `POST /api/sessions/:id/diff/summary`, `POST /api/sessions/:id/commit`, `POST /api/craft/synthesize` -- require `ANTHROPIC_API_KEY`
+- **WebSocket** -- `WS /ws` -- real-time push to all dashboard clients
 
 ## Development
 
@@ -50,10 +32,10 @@ See the [root CLAUDE.md](../../CLAUDE.md) for full endpoint documentation. Summa
 # Run all tests
 bun test src
 
-# Run a specific test file
-bun test src/api.test.js
+# Run one test file
+bun test src/routes-crafting.test.js
 
-# Run diff-summary evals (calls Anthropic API)
+# Diff summary evals (live Anthropic API)
 ANTHROPIC_API_KEY=sk-... bun run eval:diff-summary
 ```
 
@@ -61,33 +43,37 @@ ANTHROPIC_API_KEY=sk-... bun run eval:diff-summary
 
 ```
 src/
-├── index.js           # Fastify app, WebSocket endpoint, route registration
-├── db.js              # SQLite schema (7 tables), all prepared statements
-├── session-resolver.js# Session alias resolution with git root LRU cache
-├── broadcast.js       # wsClients Set + broadcast() helper
-├── stream-parser.js   # Line-buffered JSON parser for claude CLI output
-├── prompt.js          # claude --resume subprocess management
-├── swarm-manager.js   # Independent swarm agent lifecycle
-├── git-worktree.js    # Git worktree create/remove/merge/conflict ops
-├── architecture.js    # Async project source tree + import graph scanner
-├── git.js             # Re-export bridge → @agent-dashboard/diff-panel
-├── run-git.js         # Re-export bridge → @agent-dashboard/diff-panel
-├── diff.js            # Re-export bridge → @agent-dashboard/diff-panel
-├── summarize-diff.js  # Re-export bridge → @agent-dashboard/diff-panel
-├── routes/            # Fastify route plugins (one file per domain)
-│   ├── sessions.js
-│   ├── events.js
-│   ├── diff.js
-│   ├── diff-summary.js
-│   ├── prompt.js
-│   ├── swarm.js
-│   ├── worktrees.js
-│   ├── architecture.js
-│   └── crafting.js
-└── evals/             # Anthropic API quality tests (not in bun test suite)
-    └── diff-summary.eval.js
+  index.js              Fastify bootstrap, WS /ws handler, plugin registration
+  db.js                 bun:sqlite schema (7 tables) + all prepared statements
+  session-resolver.js   5-step alias resolution, 200-entry git-root LRU cache
+  broadcast.js          shared wsClients Set + broadcast()
+  stream-parser.js      Line-buffered JSON parser for claude CLI output
+  prompt.js             claude --resume subprocess management, re-exports
+  swarm-manager.js      Independent swarm agent lifecycle
+  git-worktree.js       Git worktree create/remove/merge/conflict ops
+  git-watcher.js        chokidar watchers for .git/, diff:invalidated broadcast
+  architecture.js       Async project source tree + import graph (30s cache)
+  vpn.js                VPN detection, proxy/cert env, Bun fetch options
+  git.js                Re-export bridge -> @agent-dashboard/diff-panel
+  run-git.js            Re-export bridge -> @agent-dashboard/diff-panel
+  diff.js               Re-export bridge -> @agent-dashboard/diff-panel
+  summarize-diff.js     Re-export bridge -> @agent-dashboard/diff-panel
+  routes/               Fastify route plugins (one file per domain)
+    sessions.js         Session CRUD + stop
+    events.js           Event logging + all HTTP hook adapters
+    diff.js             git diff HEAD
+    diff-summary.js     AI diff summary (SHA-256 cache, 10min TTL)
+    commit.js           AI commit message + git commit (submodule cascade)
+    prompt.js           claude --resume streaming
+    swarm.js            Swarm agent spawn/cancel/list
+    worktrees/          list, diff, merge, discard, check-conflicts
+    architecture.js     Project source tree + import graph
+    crafting.js         Craft agent/recipe CRUD + AI synthesis
+    directories.js      ~/Documents/code directory listing
+  evals/                Anthropic API quality tests (not in bun test suite)
+    diff-summary.eval.js
 ```
 
-Diff parsing, git binary resolution, and AI summarization are provided by `@agent-dashboard/diff-panel` (workspace package). The `git.js`, `run-git.js`, `diff.js`, and `summarize-diff.js` modules are thin re-export bridges that keep route import paths stable while the canonical implementations live in the shared package.
+SQLite database lives at `dashboard.db` (next to `src/`, created on first run). WAL mode, foreign keys enforced. No migrations -- schema is `CREATE TABLE IF NOT EXISTS`.
 
-The database file `dashboard.db` is created in the package root on first run (not committed to git).
+Re-export bridges (`git.js`, `run-git.js`, `diff.js`, `summarize-diff.js`) delegate to `@agent-dashboard/diff-panel/server` for shared git utilities. Route files import through `prompt.js` and `db.js` bridges -- do not import from `swarm-manager.js` or `session-resolver.js` directly.

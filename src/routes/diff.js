@@ -23,6 +23,11 @@ import { existsSync } from "node:fs";
 import { getSession, lookupSessionId } from "../db.js";
 import { parseDiffToFiles, buildStatSummary, runGit } from "@agent-dashboard/diff-panel/server";
 
+// In-flight dedup: when diff:invalidated fires, all WS clients refetch
+// simultaneously. Without dedup, N clients spawn N identical git processes.
+// This map coalesces concurrent requests for the same directory into one.
+const inflightDiffs = new Map();
+
 export default async function diffRoutes(fastify) {
   fastify.get("/api/sessions/:sessionId/diff", async (req, reply) => {
     const sessionId = lookupSessionId(req.params.sessionId);
@@ -38,35 +43,47 @@ export default async function diffRoutes(fastify) {
       return reply.code(400).send({ error: `Working directory no longer exists: ${dir}` });
     }
 
-    try {
-      const diff = await runGit(dir, ["diff", "HEAD", "--no-color", "--unified=5", "--submodule=diff"]);
-      const branch = await runGit(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
-      const files = parseDiffToFiles(diff);
+    // Dedup: if a diff is already running for this directory, reuse the promise
+    if (inflightDiffs.has(dir)) {
+      const cached = await inflightDiffs.get(dir);
+      return { ...cached, sessionId: req.params.sessionId };
+    }
 
-      return {
-        sessionId: req.params.sessionId,
-        directory: dir,
-        branch: branch.trim(),
-        stat: buildStatSummary(files),
-        diff,
-        files,
-      };
-    } catch {
-      // Fallback: repos with no commits yet
-      try {
-        const diff = await runGit(dir, ["diff", "--no-color", "--unified=5", "--submodule=diff"]);
-        const files = parseDiffToFiles(diff);
-        return {
-          sessionId: req.params.sessionId,
-          directory: dir,
-          branch: "unknown",
-          stat: buildStatSummary(files),
-          diff,
-          files,
-        };
-      } catch (fallbackErr) {
-        return reply.code(500).send({ error: `Git error: ${fallbackErr.message}` });
-      }
+    const promise = computeDiff(dir, req.params.sessionId);
+    inflightDiffs.set(dir, promise);
+    try {
+      return await promise;
+    } finally {
+      inflightDiffs.delete(dir);
     }
   });
+}
+
+async function computeDiff(dir, sessionId) {
+  try {
+    const diff = await runGit(dir, ["diff", "HEAD", "--no-color", "--unified=5", "--submodule=diff"]);
+    const branch = await runGit(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    const files = parseDiffToFiles(diff);
+
+    return {
+      sessionId,
+      directory: dir,
+      branch: branch.trim(),
+      stat: buildStatSummary(files),
+      diff,
+      files,
+    };
+  } catch {
+    // Fallback: repos with no commits yet
+    const diff = await runGit(dir, ["diff", "--no-color", "--unified=5", "--submodule=diff"]);
+    const files = parseDiffToFiles(diff);
+    return {
+      sessionId,
+      directory: dir,
+      branch: "unknown",
+      stat: buildStatSummary(files),
+      diff,
+      files,
+    };
+  }
 }
