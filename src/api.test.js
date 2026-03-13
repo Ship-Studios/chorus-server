@@ -1,7 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import websocket from "@fastify/websocket";
 import { Database } from "bun:sqlite";
 
 /**
