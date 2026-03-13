@@ -1,3 +1,29 @@
+/**
+ * AI diff summary route — generates concise natural-language summaries of git diffs
+ * using the Anthropic API.
+ *
+ * Endpoints:
+ *   POST /api/sessions/:id/diff/summary — Generate or return cached summary
+ *   GET  /api/diff-summary/status       — Check if ANTHROPIC_API_KEY is configured
+ *
+ * Caching: Summaries are cached in-memory keyed on the SHA-256 hash of the raw diff
+ * content. Cache entries have a 10-minute TTL and the cache is capped at 100 entries
+ * with LRU eviction (oldest-inserted entry removed when cap is exceeded).
+ *
+ * Content-addressable caching means the same diff always returns the same summary
+ * regardless of which session requested it, and re-running `git diff` after
+ * reverting changes won't produce stale summaries.
+ *
+ * The Anthropic client is lazily initialized with VPN-aware fetchOptions (proxy + TLS)
+ * via `getAnthropicFetchOptions()`. The cached client is invalidated on
+ * `/api/vpn/reconfigure` so it picks up new network config.
+ *
+ * Error handling distinguishes retriable errors (429 rate limit, 529 overloaded)
+ * from permanent failures (401 bad key) and passes through appropriate HTTP status
+ * codes so the UI can show actionable messages.
+ *
+ * @module routes/diff-summary
+ */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";

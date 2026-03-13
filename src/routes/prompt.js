@@ -1,3 +1,29 @@
+/**
+ * Prompt submission routes — send prompts to Claude CLI and stream responses.
+ *
+ * Endpoints:
+ *   POST /api/sessions/:id/prompt        — Submit a prompt via `claude --resume`
+ *   POST /api/sessions/:id/prompt/cancel — Cancel the active prompt (SIGTERM → SIGKILL)
+ *   GET  /api/sessions/:id/prompt/status — Check if a prompt is currently active
+ *
+ * The submit endpoint spawns a Claude CLI subprocess (`claude --resume <id> --print
+ * --output-format stream-json --verbose`) and streams structured JSON chunks to all
+ * WebSocket clients via `prompt:chunk` messages. Only one prompt may be active per
+ * session — concurrent requests return HTTP 409.
+ *
+ * Image attachments: When `image` is provided (base64 + mimeType), the server
+ * writes a temp file to the session's working directory, prepends a read instruction
+ * to the prompt, and deletes the temp file after the prompt completes. The file
+ * extension is validated against an allowlist to prevent path traversal.
+ *
+ * Body limit is 15 MB to accommodate base64-encoded images.
+ *
+ * If `--resume` fails with "no conversation found" (expired session), the server
+ * automatically retries as a fresh `claude --print` invocation and emits a
+ * `prompt:context-lost` chunk to inform the UI.
+ *
+ * @module routes/prompt
+ */
 import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";

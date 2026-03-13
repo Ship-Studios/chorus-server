@@ -155,6 +155,36 @@ export function getBranchDiffStats(repoDir, baseBranch, headBranch) {
  * @param {string} headBranch
  * @returns {string | null}
  */
+/**
+ * Parse `git worktree list --porcelain` output into an array of { path, branch } entries.
+ * Skips the first entry (always the main worktree).
+ * @param {string} porcelainOutput - Raw output from `git worktree list --porcelain`
+ * @returns {{ path: string, branch: string }[]}
+ */
+export function parseWorktreeListPorcelain(porcelainOutput) {
+  const entries = [];
+  let isFirst = true;
+  let currentPath = null;
+  let currentBranch = null;
+  for (const line of porcelainOutput.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      currentPath = line.slice(9).trim();
+      currentBranch = null;
+    } else if (line.startsWith("branch refs/heads/")) {
+      currentBranch = line.slice("branch refs/heads/".length).trim();
+    } else if (line === "") {
+      if (isFirst) {
+        isFirst = false;
+      } else if (currentPath && currentBranch) {
+        entries.push({ path: currentPath, branch: currentBranch });
+      }
+      currentPath = null;
+      currentBranch = null;
+    }
+  }
+  return entries;
+}
+
 export function detectConflicts(repoDir, baseBranch, headBranch) {
   try {
     // git merge-tree --write-tree exits non-zero if there are conflicts

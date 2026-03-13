@@ -1,3 +1,20 @@
+/**
+ * Architecture route — returns the project source tree and import graph
+ * for visualization components.
+ *
+ * Endpoints:
+ *   GET /api/sessions/:id/architecture — Source tree + import flow edges
+ *
+ * Delegates to `getArchitecture()` which scans the session's `project_dir`
+ * for source files (max 400 files, depth 8), parses import statements
+ * (ES/CJS/Python/Go), and builds a hierarchical tree with palette coloring.
+ * Results are cached for 30s in memory.
+ *
+ * The response feeds `FractalArchitecture` and `MermaidArchitecture`
+ * visualization components in the UI.
+ *
+ * @module routes/architecture
+ */
 import { getSession, lookupSessionId } from "../db.js";
 import { getArchitecture } from "../architecture.js";
 

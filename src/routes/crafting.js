@@ -1,3 +1,34 @@
+/**
+ * Crafting routes — CRUD for craft agents and recipes, plus AI-powered
+ * prompt synthesis.
+ *
+ * Endpoints:
+ *   GET    /api/craft/agents        — List all craft agents
+ *   POST   /api/craft/agents        — Create a craft agent (requires name + prompt_snippet)
+ *   PUT    /api/craft/agents/:id    — Update a craft agent
+ *   DELETE /api/craft/agents/:id    — Delete a craft agent
+ *   GET    /api/craft/recipes       — List all recipes
+ *   POST   /api/craft/recipes       — Create a recipe (requires name)
+ *   PUT    /api/craft/recipes/:id   — Update a recipe
+ *   DELETE /api/craft/recipes/:id   — Delete a recipe
+ *   POST   /api/craft/synthesize    — AI-synthesize a unified prompt from 2+ agents
+ *   GET    /api/craft/ai-status     — Check if ANTHROPIC_API_KEY is configured
+ *
+ * The synthesize endpoint combines multiple agent specializations into a single
+ * cohesive system prompt using Claude (`claude-sonnet-4-6` by default). It requires
+ * `ANTHROPIC_API_KEY` to be set on the server. The model parameter is validated
+ * against `/^[a-zA-Z0-9._/-]+$/` to prevent CLI flag injection.
+ *
+ * The Anthropic client is lazily initialized with VPN-aware fetchOptions
+ * (proxy + TLS) via `getAnthropicFetchOptions()`. The cached client is
+ * invalidated on `/api/vpn/reconfigure` via the exported `resetClient()`.
+ *
+ * Agent prompt snippets are truncated to 4000 chars per agent in the synthesis
+ * prompt to manage token costs.
+ *
+ * @module routes/crafting
+ */
+
 import { getAnthropicFetchOptions } from "../vpn.js";
 import Anthropic from "@anthropic-ai/sdk";
 import {

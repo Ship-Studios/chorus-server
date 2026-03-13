@@ -1,3 +1,36 @@
+/**
+ * Event and hook routes — log tool use events, handle Claude Code lifecycle hooks,
+ * and serve event/agent queries.
+ *
+ * Endpoints:
+ *   POST /api/events                           — Log a tool use event (from bash hooks)
+ *   POST /api/events/pre-tool                  — PreToolUse signal (broadcasts diff:pending, no DB write)
+ *   POST /api/hooks/pre-tool-use               — HTTP hook adapter for PreToolUse (snake_case payload)
+ *   POST /api/hooks/post-tool-use              — HTTP hook adapter for PostToolUse (session heartbeat + event + agent detection)
+ *   POST /api/hooks/post-tool-use-failure      — HTTP hook adapter for PostToolUseFailure (logs tool_error events)
+ *   POST /api/hooks/stop                       — HTTP hook adapter for Stop (marks session stopped)
+ *   GET  /api/sessions/:id/events              — List events for a session (last 200)
+ *   GET  /api/events/:id                       — Single event with full payload
+ *   GET  /api/events                           — Recent events across all sessions (last 100)
+ *   GET  /api/sessions/:id/agents              — List sub-agents for a session
+ *
+ * Race condition handling: `POST /api/events` auto-creates the session row if it
+ * doesn't exist yet, since PostToolUse hooks can fire before the SessionStart hook
+ * completes (TOCTOU race between hook scripts).
+ *
+ * Agent auto-detection: Events with `toolName: "Agent"` trigger automatic insertion
+ * into the `agents` table, extracting description, subagent_type, and prompt from
+ * the tool input. Prompt text is truncated to 2000 chars in the DB.
+ *
+ * Diff invalidation: Write-ops (Edit, Write, Bash, MultiEdit) broadcast
+ * `diff:invalidated` to trigger UI diff refresh. PostToolUse only fires on success,
+ * so no `toolSuccess` check is needed in the HTTP hook adapter path.
+ *
+ * Payload truncation: Large string values in tool input/response are truncated to
+ * ~50KB before storage to keep the SQLite DB lean.
+ *
+ * @module routes/events
+ */
 import { broadcast } from "../broadcast.js";
 import {
   upsertSession,

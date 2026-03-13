@@ -1,3 +1,24 @@
+/**
+ * Git diff route — returns the current uncommitted diff for a session.
+ *
+ * Endpoints:
+ *   GET /api/sessions/:id/diff — Uncommitted changes with parsed file hunks
+ *
+ * Runs `git diff HEAD` in the session's working directory. Falls back to
+ * `git diff` (no HEAD) for repos with zero commits. The response includes
+ * the raw diff string, a stat summary, the current branch name, and a
+ * `files[]` array with parsed hunks compatible with `@git-diff-view/svelte`.
+ *
+ * CWD validation: checks `existsSync(dir)` before spawning git to avoid
+ * misleading macOS `posix_spawn` ENOENT errors that blame the git binary
+ * when the working directory is actually missing.
+ *
+ * Directory resolution: uses `session.worktree_dir` when set (worktree-linked
+ * sessions), otherwise `session.project_dir`. This means the diff reflects the
+ * worktree's uncommitted changes when a swarm agent is working in isolation.
+ *
+ * @module routes/diff
+ */
 import { existsSync } from "node:fs";
 import { getSession, lookupSessionId } from "../db.js";
 import { parseDiffToFiles, buildStatSummary, runGit } from "@agent-dashboard/diff-panel/server";

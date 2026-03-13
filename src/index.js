@@ -45,7 +45,7 @@ import eventRoutes from "./routes/events.js";
 import diffRoutes from "./routes/diff.js";
 import promptRoutes from "./routes/prompt.js";
 import swarmRoutes from "./routes/swarm.js";
-import worktreeRoutes from "./routes/worktrees.js";
+import worktreeRoutes from "./routes/worktrees/index.js";
 import architectureRoutes from "./routes/architecture.js";
 import diffSummaryRoutes, { resetClient as resetDiffSummaryClient } from "./routes/diff-summary.js";
 import craftingRoutes, { resetClient as resetCraftingClient } from "./routes/crafting.js";
