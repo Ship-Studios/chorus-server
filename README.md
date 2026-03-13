@@ -1,30 +1,96 @@
 # @agent-dashboard/server
 
-Fastify 5 API server for the Agent Dashboard. Receives Claude Code lifecycle hook events, persists them to SQLite, and broadcasts real-time updates to dashboard clients over WebSocket.
+Fastify 5 backend for the Agent Dashboard. Receives Claude Code hook events, persists them to SQLite, and broadcasts real-time updates to connected browser clients over Socket.IO.
 
 ## Usage
 
 ```bash
-# Dev (hot reload)
+# Development (hot reload)
 bun --watch src/index.js
 
-# Production (started automatically by bin/dashboard.js / pulse CLI)
+# Production (started by bin/dashboard.js via `bun run start` / `pulse`)
 bun src/index.js
 ```
 
-The server listens on `http://127.0.0.1:3001` by default. Override with `PORT` and `HOST` environment variables.
+Environment variables:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PORT` | `3001` | Listen port |
+| `HOST` | `127.0.0.1` | Listen host |
+| `ANTHROPIC_API_KEY` | — | Required for diff summary, commit message, and crafting synthesis endpoints |
+| `DASHBOARD_API_KEY` | — | Optional API key guard for non-GET `/api` requests |
+| `MAX_SWARM_AGENTS` | `10` | Concurrent swarm agent limit |
+| `PULSE_ROOT_DIR` | `~/Documents/code` | Root scanned for sidebar project list |
+| `FORCE_VPN_MODE` | — | Skip VPN detection, assume on-VPN |
+| `FORCE_OFF_VPN` | — | Skip VPN detection, assume off-VPN |
 
 ## API
 
-All REST endpoints are documented in the [root CLAUDE.md](../../CLAUDE.md). Key groups:
+### Hook endpoints (called by Claude Code bash/HTTP hooks)
 
-- **Hook endpoints** -- `POST /api/sessions`, `POST /api/hooks/*` -- called by Claude Code bash and HTTP hooks
-- **Session/event queries** -- `GET /api/sessions`, `GET /api/events`, `GET /api/sessions/:id/diff`
-- **Prompt control** -- `POST /api/sessions/:id/prompt{,/cancel,/status}` -- streams `claude --resume` output
-- **Swarm agents** -- `POST /api/sessions/:id/swarm/spawn`, `POST /api/swarm/:id/cancel`
-- **Worktrees** -- `GET/POST/DELETE /api/worktrees/*` -- git branch review flow
-- **AI features** -- `POST /api/sessions/:id/diff/summary`, `POST /api/sessions/:id/commit`, `POST /api/craft/synthesize` -- require `ANTHROPIC_API_KEY`
-- **WebSocket** -- `WS /ws` -- real-time push to all dashboard clients
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `POST` | `/api/sessions` | Session heartbeat / registration (upsert) |
+| `POST` | `/api/sessions/:id/stop` | Mark session stopped |
+| `POST` | `/api/hooks/pre-tool-use` | Broadcasts `diff:pending` for write-op tools |
+| `POST` | `/api/hooks/post-tool-use` | Logs event, invalidates diff, detects agents |
+| `POST` | `/api/hooks/post-tool-use-failure` | Logs failed tool calls as `tool_error` events |
+| `POST` | `/api/hooks/stop` | Delegates to session stop |
+
+### Query endpoints
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `GET` | `/api/sessions` | List sessions (last 50) |
+| `GET` | `/api/sessions/:id/events` | Session events (last 200) |
+| `GET` | `/api/sessions/:id/agents` | Sub-agents for a session |
+| `GET` | `/api/sessions/:id/diff` | Git diff with parsed file hunks |
+| `DELETE` | `/api/sessions/:id` | Delete session and all associated data |
+| `GET` | `/api/events` | Recent events across all sessions (last 100) |
+| `GET` | `/api/events/:id` | Single event with full payload |
+| `GET` | `/api/health` | Liveness probe + VPN diagnostic state |
+
+### Prompt and swarm endpoints
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `POST` | `/api/sessions/:id/prompt` | Submit prompt via `claude --resume`, streams chunks |
+| `POST` | `/api/sessions/:id/prompt/cancel` | Cancel active prompt |
+| `GET` | `/api/sessions/:id/prompt/status` | `{ active: boolean }` |
+| `POST` | `/api/sessions/:id/swarm/spawn` | Spawn independent Claude agent |
+| `POST` | `/api/swarm/:agentId/cancel` | Cancel a swarm agent |
+| `GET` | `/api/sessions/:id/swarm` | List active swarm agents |
+
+### Worktree and code-intel endpoints
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `GET` | `/api/sessions/:id/worktrees` | List worktree branches |
+| `GET` | `/api/worktrees/:id/diff` | Three-dot diff for a branch |
+| `POST` | `/api/worktrees/:id/merge` | Merge branch via `git merge --no-ff` |
+| `DELETE` | `/api/worktrees/:id` | Discard worktree and branch |
+| `POST` | `/api/sessions/:id/diff/summary` | AI-generated diff summary |
+| `POST` | `/api/sessions/:id/commit` | AI commit message + `git commit` |
+| `GET` | `/api/sessions/:id/architecture` | Source tree + import graph |
+
+### Crafting endpoints
+
+| Method | Route | Purpose |
+|--------|-------|---------|
+| `GET/POST` | `/api/craft/agents` | List / create craft agents |
+| `PUT/DELETE` | `/api/craft/agents/:id` | Update / delete a craft agent |
+| `GET/POST` | `/api/craft/recipes` | List / create recipes |
+| `PUT/DELETE` | `/api/craft/recipes/:id` | Update / delete a recipe |
+| `POST` | `/api/craft/synthesize` | AI-synthesize prompt from 2+ agents |
+
+### WebSocket (Socket.IO)
+
+Connect to the server with a Socket.IO client. On connection, the server immediately emits an `init` message with current sessions, events, agents, and worktrees.
+
+All server-to-client messages are emitted as the `"message"` event carrying a typed payload object (e.g. `{ type: "session:updated", session }`, `{ type: "event:new", event }`).
+
+Room management: emit `join-session` with a session ID to subscribe to session-scoped messages (prompt chunks, diff invalidations, swarm output). Emit `leave-session` to unsubscribe.
 
 ## Development
 
@@ -32,48 +98,33 @@ All REST endpoints are documented in the [root CLAUDE.md](../../CLAUDE.md). Key 
 # Run all tests
 bun test src
 
-# Run one test file
-bun test src/routes-crafting.test.js
+# Run a single test file
+bun test src/broadcast.test.js
 
-# Diff summary evals (live Anthropic API)
+# Evals (real Anthropic API -- not CI)
 ANTHROPIC_API_KEY=sk-... bun run eval:diff-summary
 ```
+
+Tests use `bun:test`. Integration tests build in-memory Fastify apps with in-memory SQLite — they never touch `dashboard.db`. Broadcast tests inject a mock Socket.IO object via `setIO()`.
 
 ## Architecture
 
 ```
-src/
-  index.js              Fastify bootstrap, WS /ws handler, plugin registration
-  db.js                 bun:sqlite schema (7 tables) + all prepared statements
-  session-resolver.js   5-step alias resolution, 200-entry git-root LRU cache
-  broadcast.js          shared wsClients Set + broadcast()
-  stream-parser.js      Line-buffered JSON parser for claude CLI output
-  prompt.js             claude --resume subprocess management, re-exports
-  swarm-manager.js      Independent swarm agent lifecycle
-  git-worktree.js       Git worktree create/remove/merge/conflict ops
-  git-watcher.js        chokidar watchers for .git/, diff:invalidated broadcast
-  architecture.js       Async project source tree + import graph (30s cache)
-  vpn.js                VPN detection, proxy/cert env, Bun fetch options
-  git.js                Re-export bridge -> @agent-dashboard/diff-panel
-  run-git.js            Re-export bridge -> @agent-dashboard/diff-panel
-  diff.js               Re-export bridge -> @agent-dashboard/diff-panel
-  summarize-diff.js     Re-export bridge -> @agent-dashboard/diff-panel
-  routes/               Fastify route plugins (one file per domain)
-    sessions.js         Session CRUD + stop
-    events.js           Event logging + all HTTP hook adapters
-    diff.js             git diff HEAD
-    diff-summary.js     AI diff summary (SHA-256 cache, 10min TTL)
-    commit.js           AI commit message + git commit (submodule cascade)
-    prompt.js           claude --resume streaming
-    swarm.js            Swarm agent spawn/cancel/list
-    worktrees/          list, diff, merge, discard, check-conflicts
-    architecture.js     Project source tree + import graph
-    crafting.js         Craft agent/recipe CRUD + AI synthesis
-    directories.js      ~/Documents/code directory listing
-  evals/                Anthropic API quality tests (not in bun test suite)
-    diff-summary.eval.js
+index.js            -- Fastify bootstrap, Socket.IO init, route registration
+socket.js           -- getIO/setIO singleton (set after app.ready())
+broadcast.js        -- global + session-scoped emit helpers, diff debounce
+db.js               -- bun:sqlite schema, prepared statements, cascade delete
+session-resolver.js -- 5-step alias resolution, 200-entry git root LRU cache
+prompt.js           -- claude --resume subprocess, cancel, fallback, re-export bridge
+swarm-manager.js    -- independent agent spawn, worktree isolation, auto-commit
+git-worktree.js     -- worktree create/remove, branch ops, conflict detection
+stream-parser.js    -- line-buffered JSON parser for claude --output-format stream-json
+git-watcher.js      -- chokidar watchers on .git internals, broadcasts diff:invalidated
+architecture.js     -- source tree walker + import graph, 30s cache
+vpn.js              -- VPN probe, proxy/cert env setup, Anthropic fetch options
+routes/             -- one Fastify plugin per feature area
 ```
 
-SQLite database lives at `dashboard.db` (next to `src/`, created on first run). WAL mode, foreign keys enforced. No migrations -- schema is `CREATE TABLE IF NOT EXISTS`.
+The database lives at `packages/server/dashboard.db` (created on first run). Seven tables: `sessions`, `events`, `session_aliases`, `agents`, `worktrees`, `craft_agents`, `craft_recipes`. WAL mode, foreign keys enforced, all parameters use `$name` binding syntax.
 
-Re-export bridges (`git.js`, `run-git.js`, `diff.js`, `summarize-diff.js`) delegate to `@agent-dashboard/diff-panel/server` for shared git utilities. Route files import through `prompt.js` and `db.js` bridges -- do not import from `swarm-manager.js` or `session-resolver.js` directly.
+Diff parsing and git utilities are shared from `@agent-dashboard/diff-panel` (workspace package). Re-export bridges in `git.js`, `run-git.js`, `diff.js`, and `summarize-diff.js` keep route import paths stable.

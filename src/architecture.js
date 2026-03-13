@@ -60,6 +60,13 @@ const IMPORT_PATTERNS = [
   // Svelte: <script> imports are captured by the ES pattern above
 ];
 
+/**
+ * Parses import specifiers from file content based on the file extension.
+ *
+ * @param {string} content - The content of the file.
+ * @param {string} ext - The file extension.
+ * @returns {Set<string>} A set of unique import specifiers found in the content.
+ */
 function parseImports(content, ext) {
   const imports = new Set();
   for (const pattern of IMPORT_PATTERNS) {
@@ -76,6 +83,13 @@ function parseImports(content, ext) {
 
 // ── File type detection ─────────────────────────────────────────────────────
 
+/**
+ * Returns a descriptive label for a file based on its name and extension.
+ *
+ * @param {string} name - The name of the file.
+ * @param {string} ext - The file extension.
+ * @returns {string} A descriptive label for the file type.
+ */
 function fileDesc(name, ext) {
   const base = basename(name, ext);
   if (ext === ".svelte") return "Svelte component";
@@ -94,6 +108,13 @@ function fileDesc(name, ext) {
   return "Source file";
 }
 
+/**
+ * Returns a descriptive label for a directory based on its name and number of children.
+ *
+ * @param {string} name - The name of the directory.
+ * @param {number} childCount - The number of direct children in the directory.
+ * @returns {string} A descriptive label for the directory.
+ */
 function dirDesc(name, childCount) {
   const lower = name.toLowerCase();
   const suffix = `(${childCount} item${childCount !== 1 ? "s" : ""})`;
@@ -120,8 +141,10 @@ function dirDesc(name, childCount) {
 // ── Scanner ─────────────────────────────────────────────────────────────────
 
 /**
- * @param {string} projectDir — absolute path to the project root
- * @returns {Promise<{ tree: ArchNode, flows: Flow[] }>}
+ * Scans the project directory to build an architectural map.
+ *
+ * @param {string} projectDir - Absolute path to the project root.
+ * @returns {Promise<{ tree: ArchNode, flows: Flow[] }>} The architectural tree and data-flow edges.
  */
 export async function scanArchitecture(projectDir) {
   const files = [];
@@ -130,6 +153,13 @@ export async function scanArchitecture(projectDir) {
   // Walk directory tree
   await walk(projectDir, "", 0);
 
+  /**
+   * Recursively walks the directory tree to discover files and parse imports.
+   *
+   * @param {string} dir - The current directory path.
+   * @param {string} rel - The relative path from project root.
+   * @param {number} depth - The current recursion depth.
+   */
   async function walk(dir, rel, depth) {
     if (depth > MAX_DEPTH || files.length >= MAX_FILES) return;
 
