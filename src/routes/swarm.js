@@ -64,9 +64,14 @@ export default async function swarmRoutes(fastify) {
             // already carries the full record; clients don't need the raw stats twice.
             const { worktree: _discard, ...eventWithoutWorktree } = event;
             broadcast({ ...eventWithoutWorktree, parentSessionId: sessionId });
+            broadcast({ type: "diff:invalidated", sessionId });
             return; // Don't fall through to the generic broadcast
           }
 
+          // Swarm agent completed — may have modified files
+          if (event.type === "swarm:done") {
+            broadcast({ type: "diff:invalidated", sessionId });
+          }
           broadcast({ ...event, parentSessionId: sessionId });
         },
       ));

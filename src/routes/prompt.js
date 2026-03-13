@@ -54,6 +54,8 @@ export default async function promptRoutes(fastify) {
         (chunk) => broadcast({ type: "prompt:chunk", sessionId, chunk }),
         (result) => {
           broadcast({ type: "prompt:done", sessionId, exitCode: result.code, cancelled: result.cancelled, error: result.error, freshSession: result.freshSession || false });
+          // Prompt may have modified files — signal diff refresh
+          broadcast({ type: "diff:invalidated", sessionId });
           // Clean up the temp screenshot file once the prompt is done
           if (imagePath) {
             unlink(imagePath).catch(() => {});
@@ -62,6 +64,7 @@ export default async function promptRoutes(fastify) {
       );
     } catch (err) {
       broadcast({ type: "prompt:done", sessionId, exitCode: null, error: err.message });
+      broadcast({ type: "diff:invalidated", sessionId });
       return reply.code(500).send({ error: err.message });
     }
 
