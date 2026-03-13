@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { wsClients, broadcast } from "./broadcast.js";
 import { getAllSessions, getActiveSessions, getRecentEvents, getRecentAgents, getAllActiveWorktrees } from "./db.js";
 import { initWatchers, shutdownWatchers } from "./git-watcher.js";
+import { configureVpn, reconfigureVpn, vpnState } from "./vpn.js";
 import sessionRoutes from "./routes/sessions.js";
 import eventRoutes from "./routes/events.js";
 import diffRoutes from "./routes/diff.js";
@@ -98,7 +99,24 @@ await app.register(architectureRoutes);
 await app.register(diffSummaryRoutes);
 await app.register(craftingRoutes);
 
-app.get("/api/health", async () => ({ status: "ok", uptime: process.uptime() }));
+app.get("/api/health", async () => ({
+  status: "ok",
+  uptime: process.uptime(),
+  vpn: {
+    detected: vpnState.detected,
+    forced: vpnState.forced,
+    proxy: vpnState.proxy,
+    certPath: vpnState.certPath,
+    certValid: vpnState.certValid,
+    oauthLoaded: vpnState.oauthLoaded,
+    lastCheck: vpnState.lastCheck,
+  },
+}));
+
+app.post("/api/vpn/reconfigure", async () => {
+  const result = await reconfigureVpn();
+  return { ok: true, ...result };
+});
 
 // Start git watchers for active sessions (detects manual commits, branch switches, etc.)
 initWatchers(getActiveSessions.all());
@@ -130,6 +148,9 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, 
     done(err, undefined);
   }
 });
+
+// Detect VPN and configure proxy/cert env vars before accepting requests
+await configureVpn();
 
 await app.listen({ port: Number(PORT), host: process.env.HOST ?? "127.0.0.1" });
 console.log(`Agent Dashboard server running on http://localhost:${PORT}`);
