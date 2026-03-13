@@ -6,7 +6,7 @@ import { runGit, buildStatSummary, parseDiffToFiles, summarizeDiff } from "@agen
 
 // ── In-memory cache keyed on SHA-256 of diff content ────────────────────────
 const cache = new Map(); // Map<hash, { summary, model, timestamp }>
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 600_000; // 10 minutes — safe because cache is keyed on diff content hash
 
 function hashDiff(diff) {
   return createHash("sha256").update(diff).digest("hex");
@@ -19,6 +19,9 @@ function getCached(hash) {
     cache.delete(hash);
     return null;
   }
+  // Move to end for true LRU eviction
+  cache.delete(hash);
+  cache.set(hash, entry);
   return entry;
 }
 
@@ -89,18 +92,33 @@ export default async function diffSummaryRoutes(fastify) {
     try {
       const result = await summarizeDiff({ diff, stat, client: anthropic });
 
-      // Cache the result
-      cache.set(hash, { summary: result.summary, model: result.model, timestamp: Date.now() });
+      // Only cache non-empty summaries
+      if (result.summary) {
+        cache.set(hash, { summary: result.summary, model: result.model, timestamp: Date.now() });
 
-      // Cap cache size
-      if (cache.size > 100) {
-        const oldest = cache.keys().next().value;
-        cache.delete(oldest);
+        // Cap cache size (LRU: evict oldest-inserted entry)
+        if (cache.size > 100) {
+          const oldest = cache.keys().next().value;
+          cache.delete(oldest);
+        }
       }
 
       return { summary: result.summary, model: result.model, cached: false };
     } catch (err) {
       fastify.log.error(err, "Anthropic API error");
+      // Distinguish retriable errors from permanent failures
+      const status = err.status;
+      if (status === 429) {
+        const retryAfter = err.headers?.["retry-after"];
+        const headers = retryAfter ? { "Retry-After": retryAfter } : {};
+        return reply.code(429).headers(headers).send({ error: "Rate limited — try again later" });
+      }
+      if (status === 529) {
+        return reply.code(503).send({ error: "AI service overloaded — try again later" });
+      }
+      if (status === 401) {
+        return reply.code(502).send({ error: "API key configuration error" });
+      }
       return reply.code(502).send({
         error: `Summary generation failed: ${err.message}`,
       });

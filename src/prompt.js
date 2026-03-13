@@ -23,6 +23,9 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
   }
 
   const controller = new AbortController();
+  // Tracks whether the --resume fallback was triggered. Hoisted outside
+  // launchProcess so the flag survives across the retry call.
+  let didFallback = false;
 
   /**
    * Spawn the claude CLI process. When `resumeId` is provided, passes --resume
@@ -63,7 +66,6 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
     const parser = createStreamParser(onChunk);
     let stderrBuffer = "";
     let stdoutRaw = "";
-    let didFallback = false;
     // Guard against double-firing onDone (e.g. cancel route + close event).
     // Each launchProcess call gets its own fresh flag.
     let doneFired = false;
@@ -93,6 +95,7 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
       if (code !== 0 && resumeId && !didFallback && /no conversation found/i.test(allOutput)) {
         didFallback = true;
         console.log(`[prompt:${dashboardSessionId}] --resume failed (conversation not found), retrying as fresh prompt`);
+        onChunk({ type: "prompt:context-lost", sessionId: dashboardSessionId, reason: "Session expired or not found — starting fresh conversation" });
         onChunk({ type: "system", text: "Session expired — starting fresh prompt in the same project directory." });
         launchProcess(null);
         return;
@@ -103,7 +106,7 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
 
       parser.flush();
       const entry = activePrompts.get(dashboardSessionId);
-      onDone({ code, cancelled: entry?.cancelled ?? false });
+      onDone({ code, cancelled: entry?.cancelled ?? false, freshSession: didFallback || false });
       if (entry) entry.done = true;
       setTimeout(() => {
         const current = activePrompts.get(dashboardSessionId);
@@ -115,7 +118,7 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
       if (doneFired) return;
       doneFired = true;
 
-      onDone({ code: null, error: err.message });
+      onDone({ code: null, error: err.message, freshSession: didFallback || false });
       const entry = activePrompts.get(dashboardSessionId);
       if (entry) entry.done = true;
       setTimeout(() => {

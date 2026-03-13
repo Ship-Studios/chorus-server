@@ -53,7 +53,7 @@ export default async function promptRoutes(fastify) {
         { prompt: finalPrompt, cwd, claudeSessionId, permissionMode },
         (chunk) => broadcast({ type: "prompt:chunk", sessionId, chunk }),
         (result) => {
-          broadcast({ type: "prompt:done", sessionId, exitCode: result.code, cancelled: result.cancelled, error: result.error });
+          broadcast({ type: "prompt:done", sessionId, exitCode: result.code, cancelled: result.cancelled, error: result.error, freshSession: result.freshSession || false });
           // Clean up the temp screenshot file once the prompt is done
           if (imagePath) {
             unlink(imagePath).catch(() => {});

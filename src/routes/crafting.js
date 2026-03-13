@@ -14,6 +14,13 @@ import {
 
 const SYNTHESIS_MODEL = "claude-sonnet-4-6";
 
+let client = null;
+function getClient() {
+  if (!process.env.ANTHROPIC_API_KEY) return null;
+  if (!client) client = new Anthropic({ maxRetries: 3, timeout: 60_000 });
+  return client;
+}
+
 export default async function craftingRoutes(fastify) {
   // --- AI Status ---
 
@@ -24,7 +31,8 @@ export default async function craftingRoutes(fastify) {
   // --- Synthesize ---
 
   fastify.post("/api/craft/synthesize", async (req, reply) => {
-    if (!process.env.ANTHROPIC_API_KEY) {
+    const anthropic = getClient();
+    if (!anthropic) {
       return reply.code(503).send({ error: "ANTHROPIC_API_KEY not configured on server" });
     }
 
@@ -33,16 +41,26 @@ export default async function craftingRoutes(fastify) {
       return reply.code(400).send({ error: "At least 2 agents are required" });
     }
 
+    const resolvedModel = model ?? SYNTHESIS_MODEL;
+    if (model && !/^[a-zA-Z0-9._/-]+$/.test(model)) {
+      return reply.code(400).send({ error: "Invalid model name" });
+    }
+
+    const MAX_SNIPPET_CHARS = 4_000;
     const agentDescriptions = agents
-      .map(
-        (a) =>
-          `### ${a.name}\nDescription: ${a.description ?? "N/A"}\nExpertise prompt:\n${a.prompt_snippet}`
-      )
+      .map((a) => {
+        const snippet = (a.prompt_snippet || "").length > MAX_SNIPPET_CHARS
+          ? a.prompt_snippet.slice(0, MAX_SNIPPET_CHARS) + "\n[truncated]"
+          : a.prompt_snippet;
+        return `### ${a.name}\nDescription: ${a.description ?? "N/A"}\nExpertise prompt:\n${snippet}`;
+      })
       .join("\n\n");
 
-    const metaPrompt = `You are a prompt engineer specializing in creating powerful AI agent system prompts.
+    const systemPrompt =
+      "You are a prompt engineer specializing in creating powerful AI agent system prompts. " +
+      "You integrate multiple agent specializations into cohesive, well-structured system prompts ready for Claude.";
 
-Given the following agent specializations, create a single cohesive system prompt that combines ALL their capabilities into one unified super-agent. The result should:
+    const userPrompt = `Given the following agent specializations, create a single cohesive system prompt that combines ALL their capabilities into one unified super-agent. The result should:
 
 1. Integrate all areas of expertise seamlessly
 2. Preserve the specific knowledge and instructions from each agent
@@ -56,18 +74,22 @@ ${agentDescriptions}
 Output ONLY the synthesized system prompt text. No explanations, no preamble, no markdown code fences. Just the system prompt itself.`;
 
     try {
-      const anthropic = new Anthropic();
       const msg = await anthropic.messages.create({
-        model: model ?? SYNTHESIS_MODEL,
+        model: resolvedModel,
         max_tokens: 4096,
-        messages: [{ role: "user", content: metaPrompt }],
+        system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+        messages: [{ role: "user", content: userPrompt }],
       });
 
       const text = msg.content?.[0]?.text;
       if (!text) throw new Error("No content in API response");
 
-      return { prompt: text, model: model ?? SYNTHESIS_MODEL, usage: msg.usage };
+      const truncated = msg.stop_reason === "max_tokens";
+      return { prompt: text, model: resolvedModel, usage: msg.usage, truncated };
     } catch (e) {
+      if (e.status === 429) return reply.code(429).send({ error: "Rate limited — try again in a moment" });
+      if (e.status === 529) return reply.code(503).send({ error: "AI service overloaded — try again later" });
+      if (e.status === 401) return reply.code(502).send({ error: "Server API key is invalid — contact admin" });
       const status = e.status ?? 500;
       return reply.code(status).send({ error: e.message ?? "Synthesis failed" });
     }

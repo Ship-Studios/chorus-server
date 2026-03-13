@@ -12,6 +12,8 @@ describe("summarize-diff constants", () => {
     expect(SYSTEM_PROMPT.length).toBeGreaterThan(0);
     expect(SYSTEM_PROMPT).toContain("dashboard");
     expect(SYSTEM_PROMPT).toContain("120 words");
+    // Must NOT contain bold instructions (contradicts eval's no-bold-text check)
+    expect(SYSTEM_PROMPT).not.toContain("**bold**");
   });
 
   it("exports a default model", () => {
@@ -33,8 +35,9 @@ describe("buildUserPrompt", () => {
   it("includes the instruction text", () => {
     const prompt = buildUserPrompt("", "");
     expect(prompt).toContain("Summarize this git diff");
-    expect(prompt).toContain("one-sentence overview");
-    expect(prompt).toContain("functional impact");
+    // Detailed instructions now live in SYSTEM_PROMPT only (no duplication)
+    expect(prompt).toContain("<stat>");
+    expect(prompt).toContain("<diff>");
   });
 });
 
