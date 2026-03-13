@@ -135,6 +135,14 @@ import commitRoutes, { resetClient as resetCommitClient } from "./routes/commit.
  */
 import craftingRoutes, { resetClient as resetCraftingClient } from "./routes/crafting.js";
 
+/**
+ * @see {@link ./routes/directories.js} — Lists directories under ~/Documents/code for sidebar nav.
+ * Endpoint: `GET /api/directories` → `{ directories: { name, path }[], basePath }`.
+ * Filters hidden (dot-prefixed) directories; sorted alphabetically. Synchronous readdir
+ * scoped to `~/Documents/code` — no recursive traversal.
+ */
+import directoryRoutes from "./routes/directories.js";
+
 /** @type {number} Server listen port, overridable via PORT env var. */
 const PORT = process.env.PORT ?? 3001;
 
@@ -264,6 +272,7 @@ await app.register(architectureRoutes); // GET              /api/sessions/:id/ar
 await app.register(diffSummaryRoutes);  // POST/GET         /api/sessions/:id/diff/summary, /api/diff-summary/status
 await app.register(commitRoutes);       // POST             /api/sessions/:id/commit
 await app.register(craftingRoutes);     // GET/POST/PUT/DELETE /api/craft/{agents,recipes}, POST /api/craft/synthesize
+await app.register(directoryRoutes);   // GET              /api/directories
 
 /**
  * Clean up duplicate sessions from prior TOCTOU races in resolveSessionId().

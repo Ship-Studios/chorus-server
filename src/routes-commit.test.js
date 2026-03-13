@@ -503,6 +503,61 @@ describe("POST /api/sessions/:sessionId/commit", () => {
     expect(git(repoDir, ["status", "--short"]).trim()).not.toBe("");
   });
 
+  it("commits submodule-only changes without false 'No changes to commit'", async () => {
+    // Set up parent repo with a submodule using -c protocol.file.allow=always
+    // to bypass git's local transport restrictions in test environments.
+    const root = mkdtempSync(join(tmpdir(), "routes-commit-sub-"));
+    tempRoots.push(root);
+
+    // Create the "upstream" sub-repo
+    const subRepo = join(root, "sub-repo");
+    mkdirSync(subRepo);
+    git(subRepo, ["init", "-b", "main"]);
+    writeFileSync(join(subRepo, "lib.js"), "export const lib = true;\n");
+    git(subRepo, ["add", "."]);
+    git(subRepo, ["commit", "-m", "chore: init sub"]);
+
+    // Create the parent repo and add the submodule
+    const parentRepo = join(root, "parent");
+    mkdirSync(parentRepo);
+    git(parentRepo, ["init", "-b", "main"]);
+    writeFileSync(join(parentRepo, "app.js"), "export const app = true;\n");
+    git(parentRepo, ["add", "."]);
+    git(parentRepo, ["commit", "-m", "chore: init parent"]);
+    git(parentRepo, ["-c", "protocol.file.allow=always", "submodule", "add", subRepo, "packages/sub"]);
+    git(parentRepo, ["commit", "-m", "chore: add submodule"]);
+
+    // Make a change ONLY inside the submodule (no parent file changes)
+    const subInParent = join(parentRepo, "packages/sub");
+    writeFileSync(join(subInParent, "lib.js"), "export const lib = true;\nexport const updated = true;\n");
+
+    registerSession("submodule-only-session", { project_dir: parentRepo });
+    // Per-scope JSON messages for the multi-scope AI call
+    anthropicResponses.push(
+      JSON.stringify({
+        "packages/sub": "fix(sub): update lib export",
+        "parent": "chore: update submodule pointers",
+      }),
+    );
+    const app = await createApp();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/sessions/submodule-only-session/commit",
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.submoduleCommits).toBeArrayOfSize(1);
+    expect(body.submoduleCommits[0].name).toBe("packages/sub");
+    // Submodule should be clean after commit
+    expect(git(subInParent, ["status", "--short"]).trim()).toBe("");
+    // Parent should be clean (submodule pointer was committed)
+    expect(git(parentRepo, ["status", "--short"]).trim()).toBe("");
+    expect(broadcastCalls).toEqual([{ type: "diff:invalidated", sessionId: "submodule-only-session" }]);
+  });
+
   it("reuses the cached Anthropic client until resetClient is called", async () => {
     const { repoDir } = createCommittedRepo();
     registerSession("cache-session", {
