@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { wsClients, broadcast } from "./broadcast.js";
-import { getAllSessions, getActiveSessions, getRecentEvents, getRecentAgents, getAllActiveWorktrees } from "./db.js";
+import { getAllSessions, getActiveSessions, getRecentEvents, getRecentAgents, getAllActiveWorktrees, deduplicateSessions } from "./db.js";
 import { initWatchers, shutdownWatchers } from "./git-watcher.js";
 import { configureVpn, reconfigureVpn, vpnState } from "./vpn.js";
 import sessionRoutes from "./routes/sessions.js";
@@ -98,6 +98,9 @@ await app.register(worktreeRoutes);
 await app.register(architectureRoutes);
 await app.register(diffSummaryRoutes);
 await app.register(craftingRoutes);
+
+// Clean up any duplicate sessions from prior TOCTOU races in resolveSessionId
+deduplicateSessions();
 
 app.get("/api/health", async () => ({
   status: "ok",

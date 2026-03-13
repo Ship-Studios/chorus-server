@@ -45,7 +45,7 @@ export default async function promptRoutes(fastify) {
     // Use the stored CLI session ID for --resume (not the dashboard's internal ID)
     const claudeSessionId = session.current_claude_session_id || req.params.sessionId;
 
-    broadcast({ type: "prompt:start", sessionId, prompt: finalPrompt, hasImage: !!imagePath });
+    broadcast({ type: "prompt:start", sessionId, prompt: finalPrompt, hasImage: !!imagePath, permissionMode: permissionMode || null });
 
     try {
       sendPrompt(

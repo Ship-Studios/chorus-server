@@ -8,6 +8,7 @@ import {
   findActiveSessionByGitRoot,
   findRecentSessionByGitRoot,
   upsertSession,
+  runInTransaction,
 } from "./db.js";
 
 /**
@@ -95,64 +96,70 @@ function findSessionByGitRoot(dir, gitRoot) {
  * @returns {string} The canonical dashboard session ID
  */
 export function resolveSessionId(claudeSessionId, projectDir) {
-  // 1. Already mapped?
-  const existing = getAlias.get({ $claudeSessionId: claudeSessionId });
-  if (existing) {
-    return existing.dashboard_session_id;
+  // Pre-compute git root OUTSIDE the transaction — cachedGitRoot may shell out
+  // to `git worktree list`, and we must not hold a SQLite write lock during I/O.
+  const needsGitRoot = projectDir && projectDir !== "unknown";
+  const gitRoot = needsGitRoot ? cachedGitRoot(projectDir) : null;
+
+  // Pre-compute git root session match outside transaction too (also shells out)
+  let gitRootMatch = null;
+  if (gitRoot && gitRoot !== projectDir) {
+    gitRootMatch = findSessionByGitRoot(projectDir, gitRoot);
   }
 
-  if (projectDir && projectDir !== "unknown") {
-    // 2. Active session for the same project dir?
-    const active = findActiveSessionByDir.get({ $projectDir: projectDir });
-    if (active) {
-      insertAlias.run({
-        $claudeSessionId: claudeSessionId,
-        $dashboardSessionId: active.id,
-      });
-      return active.id;
+  return runInTransaction(() => {
+    // 1. Already mapped?
+    const existing = getAlias.get({ $claudeSessionId: claudeSessionId });
+    if (existing) {
+      return existing.dashboard_session_id;
     }
 
-    // 3. Any recent session for the same project dir?
-    const recent = findRecentSessionByDir.get({ $projectDir: projectDir });
-    if (recent) {
-      insertAlias.run({
-        $claudeSessionId: claudeSessionId,
-        $dashboardSessionId: recent.id,
-      });
-      return recent.id;
-    }
-
-    // 4. Check git repo root — worktrees resolve to same root as parent repo
-    const gitRoot = cachedGitRoot(projectDir);
-    if (gitRoot && gitRoot !== projectDir) {
-      const byRoot = findSessionByGitRoot(projectDir, gitRoot);
-      if (byRoot) {
+    if (needsGitRoot) {
+      // 2. Active session for the same project dir?
+      const active = findActiveSessionByDir.get({ $projectDir: projectDir });
+      if (active) {
         insertAlias.run({
           $claudeSessionId: claudeSessionId,
-          $dashboardSessionId: byRoot.id,
+          $dashboardSessionId: active.id,
         });
-        return byRoot.id;
+        return active.id;
+      }
+
+      // 3. Any recent session for the same project dir?
+      const recent = findRecentSessionByDir.get({ $projectDir: projectDir });
+      if (recent) {
+        insertAlias.run({
+          $claudeSessionId: claudeSessionId,
+          $dashboardSessionId: recent.id,
+        });
+        return recent.id;
+      }
+
+      // 4. Check git repo root match (pre-computed outside transaction)
+      if (gitRootMatch) {
+        insertAlias.run({
+          $claudeSessionId: claudeSessionId,
+          $dashboardSessionId: gitRootMatch.id,
+        });
+        return gitRootMatch.id;
       }
     }
-  }
 
-  // 5. New session — alias to itself AND create the session row atomically.
-  // Creating the row here (not just the alias) prevents a race condition where
-  // concurrent requests each see no active session in step 2 and each create
-  // their own. With the row present immediately, subsequent requests find it.
-  insertAlias.run({
-    $claudeSessionId: claudeSessionId,
-    $dashboardSessionId: claudeSessionId,
+    // 5. New session — alias to itself AND create the session row atomically.
+    insertAlias.run({
+      $claudeSessionId: claudeSessionId,
+      $dashboardSessionId: claudeSessionId,
+    });
+    upsertSession.run({
+      $id: claudeSessionId,
+      $projectDir: projectDir || "unknown",
+      $worktreeDir: null,
+      $status: "active",
+      $model: null,
+      $currentClaudeSessionId: claudeSessionId,
+    });
+    return claudeSessionId;
   });
-  upsertSession.run({
-    $id: claudeSessionId,
-    $projectDir: projectDir || "unknown",
-    $worktreeDir: null,
-    $status: "active",
-    $model: null,
-    $currentClaudeSessionId: claudeSessionId,
-  });
-  return claudeSessionId;
 }
 
 /**

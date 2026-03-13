@@ -10,6 +10,15 @@ const db = new Database(DB_PATH, { create: true });
 db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
 
+/**
+ * Runs a function inside a SQLite transaction (BEGIN IMMEDIATE / COMMIT).
+ * IMMEDIATE mode acquires a write lock at BEGIN — prevents TOCTOU races
+ * where concurrent readers all see empty state before any writer commits.
+ */
+export function runInTransaction(fn) {
+  return db.transaction(fn)();
+}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -363,5 +372,38 @@ export const updateCraftRecipeStmt = db.prepare(`
   RETURNING *
 `);
 export const deleteCraftRecipeStmt = db.prepare(`DELETE FROM craft_recipes WHERE id = $id`);
+
+/**
+ * Merges duplicate active sessions for the same project_dir.
+ * Keeps the oldest session (first created), re-parents all data from duplicates.
+ * Intended to run once at server startup to clean up any existing duplicates
+ * caused by the now-fixed TOCTOU race in resolveSessionId.
+ */
+export function deduplicateSessions() {
+  const dupes = db.prepare(`
+    SELECT project_dir, GROUP_CONCAT(id) as ids
+    FROM sessions WHERE status = 'active'
+    GROUP BY project_dir HAVING COUNT(*) > 1
+  `).all();
+
+  for (const { project_dir, ids } of dupes) {
+    const idList = ids.split(",");
+    const keep = idList[0];
+    const remove = idList.slice(1);
+    db.transaction(() => {
+      for (const id of remove) {
+        db.prepare(`UPDATE session_aliases SET dashboard_session_id = $keep WHERE dashboard_session_id = $id`)
+          .run({ $keep: keep, $id: id });
+        db.prepare(`UPDATE events SET session_id = $keep WHERE session_id = $id`)
+          .run({ $keep: keep, $id: id });
+        db.prepare(`UPDATE agents SET session_id = $keep WHERE session_id = $id`)
+          .run({ $keep: keep, $id: id });
+        db.prepare(`DELETE FROM sessions WHERE id = $id`).run({ $id: id });
+      }
+    })();
+    console.log(`[dedup] Merged ${remove.length} duplicate session(s) for ${project_dir} → ${keep}`);
+  }
+  return dupes.length;
+}
 
 export default db;
