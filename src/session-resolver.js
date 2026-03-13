@@ -59,6 +59,12 @@ function resolveGitRoot(dir) {
 const GIT_ROOT_CACHE_MAX = 200;
 const gitRootCache = new Map();
 
+/**
+ * Resolves a directory to its git root, with caching.
+ *
+ * @param {string} dir - The directory to resolve
+ * @returns {string|null} The resolved git root, or null
+ */
 function cachedGitRoot(dir) {
   if (gitRootCache.has(dir)) return gitRootCache.get(dir);
   const root = resolveGitRoot(dir);
@@ -182,6 +188,9 @@ export function resolveSessionId(claudeSessionId, projectDir) {
  * Resolves a Claude Code session_id to its dashboard session ID (read-only).
  * Used by event and stop handlers where we don't want to create new sessions.
  * Falls back to the input ID if no alias exists.
+ *
+ * @param {string} claudeSessionId - The Claude Code session ID to look up
+ * @returns {string} The canonical dashboard session ID
  */
 export function lookupSessionId(claudeSessionId) {
   const existing = getAlias.get({ $claudeSessionId: claudeSessionId });

@@ -28,6 +28,11 @@ import { parseDiffToFiles, buildStatSummary, runGit } from "@agent-dashboard/dif
 // This map coalesces concurrent requests for the same directory into one.
 const inflightDiffs = new Map();
 
+/**
+ * Fastify plugin for diff routes.
+ *
+ * @param {import("fastify").FastifyInstance} fastify - The Fastify instance.
+ */
 export default async function diffRoutes(fastify) {
   fastify.get("/api/sessions/:sessionId/diff", async (req, reply) => {
     const sessionId = lookupSessionId(req.params.sessionId);
@@ -59,6 +64,13 @@ export default async function diffRoutes(fastify) {
   });
 }
 
+/**
+ * Compute the git diff for a directory.
+ *
+ * @param {string} dir - The directory to run git diff in.
+ * @param {string} sessionId - The session ID.
+ * @returns {Promise<object>} The diff results.
+ */
 async function computeDiff(dir, sessionId) {
   try {
     const diff = await runGit(dir, ["diff", "HEAD", "--no-color", "--unified=5", "--submodule=diff"]);

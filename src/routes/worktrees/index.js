@@ -13,6 +13,11 @@ import worktreeListRoutes from "./list.js";
 import worktreeDiffRoutes from "./diff.js";
 import worktreeMutationRoutes from "./mutations.js";
 
+/**
+ * Fastify plugin for worktree routes.
+ * 
+ * @param {import("fastify").FastifyInstance} fastify - Fastify instance
+ */
 export default async function worktreeRoutes(fastify) {
   await fastify.register(worktreeListRoutes);
   await fastify.register(worktreeDiffRoutes);

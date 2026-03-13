@@ -149,36 +149,44 @@ export const upsertSession = db.prepare(`
     last_seen_at = datetime('now')
 `);
 
+/** Updates the status of a session and its last_seen_at timestamp. */
 export const updateSessionStatus = db.prepare(`
   UPDATE sessions SET status = $status, last_seen_at = datetime('now') WHERE id = $id
 `);
 
+/** Inserts a new event into the database. */
 export const insertEvent = db.prepare(`
   INSERT INTO events (session_id, type, tool_name, file_path, summary, payload)
   VALUES ($sessionId, $type, $toolName, $filePath, $summary, $payload)
   RETURNING id
 `);
 
+/** Retrieves a single event by its ID. */
 export const getEvent = db.prepare(`
   SELECT * FROM events WHERE id = $id
 `);
 
+/** Retrieves a single session by its ID. */
 export const getSession = db.prepare(`
   SELECT * FROM sessions WHERE id = $id
 `);
 
+/** Retrieves all active sessions, ordered by start time (newest first). */
 export const getActiveSessions = db.prepare(`
   SELECT * FROM sessions WHERE status = 'active' ORDER BY started_at DESC
 `);
 
+/** Retrieves up to 50 of the most recent sessions. */
 export const getAllSessions = db.prepare(`
   SELECT * FROM sessions ORDER BY started_at DESC LIMIT 50
 `);
 
+/** Retrieves up to 200 events for a specific session, newest first. */
 export const getSessionEvents = db.prepare(`
   SELECT * FROM events WHERE session_id = $sessionId ORDER BY created_at DESC LIMIT 200
 `);
 
+/** Retrieves up to 100 most recent events across all sessions. */
 export const getRecentEvents = db.prepare(`
   SELECT e.*, s.project_dir FROM events e
   JOIN sessions s ON e.session_id = s.id
@@ -196,22 +204,26 @@ export const getRecentEventsSlim = db.prepare(`
 
 // --- Agent (sub-agent) tracking ---
 
+/** Inserts a new sub-agent record. */
 export const insertAgent = db.prepare(`
   INSERT INTO agents (session_id, event_id, description, agent_type, prompt, status)
   VALUES ($sessionId, $eventId, $description, $agentType, $prompt, $status)
   RETURNING id
 `);
 
+/** Retrieves all agents associated with a session. */
 export const getSessionAgents = db.prepare(`
   SELECT * FROM agents WHERE session_id = $sessionId ORDER BY created_at DESC
 `);
 
+/** Counts the number of agents associated with a session. */
 export const getSessionAgentCount = db.prepare(`
   SELECT COUNT(*) as count FROM agents WHERE session_id = $sessionId
 `);
 
 // --- Worktree (PR-like review) tracking ---
 
+/** Inserts or updates a worktree record for a session and branch. */
 export const insertWorktree = db.prepare(`
   INSERT INTO worktrees (session_id, branch_name, base_branch, description, agent_id, status)
   VALUES ($sessionId, $branchName, $baseBranch, $description, $agentId, $status)
@@ -223,6 +235,7 @@ export const insertWorktree = db.prepare(`
   RETURNING id
 `);
 
+/** Updates statistics (lines changed, etc.) for a worktree. */
 export const updateWorktreeStats = db.prepare(`
   UPDATE worktrees SET
     files_changed = $filesChanged,
@@ -234,26 +247,32 @@ export const updateWorktreeStats = db.prepare(`
   WHERE id = $id
 `);
 
+/** Updates the status of a worktree. */
 export const updateWorktreeStatus = db.prepare(`
   UPDATE worktrees SET status = $status, updated_at = datetime('now') WHERE id = $id
 `);
 
+/** Updates conflict information for a worktree. */
 export const updateWorktreeConflicts = db.prepare(`
   UPDATE worktrees SET conflict_info = $conflictInfo, updated_at = datetime('now') WHERE id = $id
 `);
 
+/** Retrieves a single worktree by its ID. */
 export const getWorktree = db.prepare(`
   SELECT * FROM worktrees WHERE id = $id
 `);
 
+/** Retrieves a worktree by session ID and branch name. */
 export const getWorktreeByBranch = db.prepare(`
   SELECT * FROM worktrees WHERE session_id = $sessionId AND branch_name = $branchName
 `);
 
+/** Retrieves all worktrees for a specific session. */
 export const getSessionWorktrees = db.prepare(`
   SELECT * FROM worktrees WHERE session_id = $sessionId ORDER BY created_at DESC
 `);
 
+/** Retrieves up to 500 most recent agent runs. */
 export const getRecentAgents = db.prepare(`SELECT * FROM agents ORDER BY created_at DESC LIMIT 500`);
 
 /** Slim version for WS init — excludes prompt column to reduce payload by ~1MB. */
@@ -261,8 +280,11 @@ export const getRecentAgentsSlim = db.prepare(`
   SELECT id, session_id, event_id, description, agent_type, status, created_at
   FROM agents ORDER BY created_at DESC LIMIT 500
 `);
+
+/** Retrieves all active worktrees (pending or ready). */
 export const getAllActiveWorktrees = db.prepare(`SELECT * FROM worktrees WHERE status IN ('pending', 'ready') ORDER BY created_at DESC`);
 
+/** Deletes a worktree record by its ID. */
 export const deleteWorktreeRow = db.prepare(`
   DELETE FROM worktrees WHERE id = $id
 `);
@@ -270,15 +292,18 @@ export const deleteWorktreeRow = db.prepare(`
 // --- Session alias resolution ---
 // Prepared statements exported for use by session-resolver.js
 
+/** Retrieves the dashboard session ID associated with a Claude session ID. */
 export const getAlias = db.prepare(`
   SELECT dashboard_session_id FROM session_aliases WHERE claude_session_id = $claudeSessionId
 `);
 
+/** Creates or updates an alias between a Claude session ID and a dashboard session ID. */
 export const insertAlias = db.prepare(`
   INSERT OR REPLACE INTO session_aliases (claude_session_id, dashboard_session_id)
   VALUES ($claudeSessionId, $dashboardSessionId)
 `);
 
+/** Finds the most recently active session ID for a given project directory. */
 export const findActiveSessionByDir = db.prepare(`
   SELECT id FROM sessions
   WHERE project_dir = $projectDir AND status = 'active'
@@ -286,6 +311,7 @@ export const findActiveSessionByDir = db.prepare(`
   LIMIT 1
 `);
 
+/** Finds a session ID for a project directory that was seen in the last 30 minutes. */
 export const findRecentSessionByDir = db.prepare(`
   SELECT id FROM sessions
   WHERE project_dir = $projectDir AND last_seen_at >= datetime('now', '-30 minutes')
@@ -293,6 +319,7 @@ export const findRecentSessionByDir = db.prepare(`
   LIMIT 1
 `);
 
+/** Retrieves up to 50 active sessions for git root resolution. */
 export const findActiveSessionByGitRoot = db.prepare(`
   SELECT id, project_dir FROM sessions
   WHERE status = 'active'
@@ -300,6 +327,7 @@ export const findActiveSessionByGitRoot = db.prepare(`
   LIMIT 50
 `);
 
+/** Retrieves up to 50 sessions seen in the last 30 minutes for git root resolution. */
 export const findRecentSessionByGitRoot = db.prepare(`
   SELECT id, project_dir FROM sessions
   WHERE last_seen_at >= datetime('now', '-30 minutes')
@@ -311,6 +339,7 @@ export const findRecentSessionByGitRoot = db.prepare(`
 // so existing route imports from db.js continue to work unchanged.
 export { resolveSessionId, lookupSessionId } from "./session-resolver.js";
 
+/** Returns the ID of the last inserted row. */
 export const getLastInsertRowId = () => db.query("SELECT last_insert_rowid() AS id").get();
 
 // --- Session deletion (cascading) ---
@@ -359,13 +388,20 @@ export function deleteSession(sessionId) {
 
 // --- Crafting workbench ---
 
+/** Retrieves all crafting agents, ordered by name. */
 export const getAllCraftAgents = db.prepare(`SELECT * FROM craft_agents ORDER BY name`);
+
+/** Retrieves a single crafting agent by its ID. */
 export const getCraftAgent = db.prepare(`SELECT * FROM craft_agents WHERE id = $id`);
+
+/** Inserts a new crafting agent. */
 export const insertCraftAgent = db.prepare(`
   INSERT INTO craft_agents (name, description, prompt_snippet, icon, color, tags, model_preference)
   VALUES ($name, $description, $promptSnippet, $icon, $color, $tags, $modelPreference)
   RETURNING *
 `);
+
+/** Updates an existing crafting agent. */
 export const updateCraftAgentStmt = db.prepare(`
   UPDATE craft_agents SET
     name = $name, description = $description, prompt_snippet = $promptSnippet,
@@ -374,15 +410,24 @@ export const updateCraftAgentStmt = db.prepare(`
   WHERE id = $id
   RETURNING *
 `);
+
+/** Deletes a crafting agent by its ID. */
 export const deleteCraftAgentStmt = db.prepare(`DELETE FROM craft_agents WHERE id = $id`);
 
+/** Retrieves all crafting recipes, newest first. */
 export const getAllCraftRecipes = db.prepare(`SELECT * FROM craft_recipes ORDER BY updated_at DESC`);
+
+/** Retrieves a single crafting recipe by its ID. */
 export const getCraftRecipe = db.prepare(`SELECT * FROM craft_recipes WHERE id = $id`);
+
+/** Inserts a new crafting recipe. */
 export const insertCraftRecipe = db.prepare(`
   INSERT INTO craft_recipes (name, description, synthesized_prompt, ingredient_ids, icon, color, tags, model_preference)
   VALUES ($name, $description, $synthesizedPrompt, $ingredientIds, $icon, $color, $tags, $modelPreference)
   RETURNING *
 `);
+
+/** Updates an existing crafting recipe. */
 export const updateCraftRecipeStmt = db.prepare(`
   UPDATE craft_recipes SET
     name = $name, description = $description, synthesized_prompt = $synthesizedPrompt,
@@ -391,6 +436,8 @@ export const updateCraftRecipeStmt = db.prepare(`
   WHERE id = $id
   RETURNING *
 `);
+
+/** Deletes a crafting recipe by its ID. */
 export const deleteCraftRecipeStmt = db.prepare(`DELETE FROM craft_recipes WHERE id = $id`);
 
 /**

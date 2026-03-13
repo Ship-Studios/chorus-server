@@ -50,6 +50,9 @@ export const vpnState = {
 /**
  * Probe VPN connectivity by hitting an internal Walmart endpoint.
  * Returns true if the endpoint is reachable within the timeout.
+ *
+ * @param {number} [timeoutSec=5] - The timeout in seconds for the curl command.
+ * @returns {Promise<boolean>} A promise that resolves to true if VPN is detected, false otherwise.
  */
 function detectVpn(timeoutSec = 5) {
   return new Promise((resolve) => {
@@ -61,7 +64,11 @@ function detectVpn(timeoutSec = 5) {
   });
 }
 
-/** Find the first existing certificate file from well-known paths. */
+/**
+ * Find the first existing certificate file from well-known paths.
+ *
+ * @returns {string} The path to the first existing certificate file found, or a fallback path.
+ */
 function findCert() {
   if (process.env.WALMART_CERT_PATH) return process.env.WALMART_CERT_PATH;
   for (const p of CERT_SEARCH_PATHS) {
@@ -70,7 +77,11 @@ function findCert() {
   return CERT_SEARCH_PATHS[0]; // fallback (will show warning)
 }
 
-/** Try to extract access_token from a JSON OAuth token file. */
+/**
+ * Try to extract access_token from a JSON OAuth token file.
+ *
+ * @returns {string|null} The access token if found, otherwise null.
+ */
 function loadOAuthToken() {
   for (const p of OAUTH_PATHS) {
     if (!existsSync(p)) continue;
@@ -84,7 +95,12 @@ function loadOAuthToken() {
   return null;
 }
 
-/** Validate that the cert file exists and looks like PEM. */
+/**
+ * Validate that the cert file exists and looks like PEM.
+ *
+ * @param {string} certPath - The path to the certificate file to validate.
+ * @returns {boolean} True if the certificate is valid, false otherwise.
+ */
 function validateCert(certPath) {
   if (!existsSync(certPath)) return false;
   try {
@@ -98,6 +114,8 @@ function validateCert(certPath) {
 /**
  * Apply VPN environment variables to `process.env`.
  * Called when on-VPN (detected or forced).
+ *
+ * @param {string} certPath - The path to the corporate CA certificate.
  */
 function applyVpnEnv(certPath) {
   process.env.NODE_EXTRA_CA_CERTS = certPath;
@@ -135,7 +153,7 @@ function clearVpnEnv() {
  * Detect VPN status and configure the process environment.
  * Call this before `app.listen()` for deterministic startup.
  *
- * @returns {{ onVpn: boolean, certPath: string|null, certValid: boolean }}
+ * @returns {Promise<{ onVpn: boolean, certPath: string|null, certValid: boolean }>} The detection results.
  */
 export async function configureVpn() {
   const certPath = findCert();
@@ -215,6 +233,8 @@ export function getAnthropicFetchOptions() {
 /**
  * Re-detect VPN and reconfigure environment (for mid-session toggling).
  * Same logic as `configureVpn` but always runs live detection (ignores FORCE_ vars).
+ *
+ * @returns {Promise<{ onVpn: boolean, certPath: string|null, certValid: boolean }>} The reconfiguration results.
  */
 export async function reconfigureVpn() {
   const certPath = findCert();

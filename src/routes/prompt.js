@@ -33,6 +33,11 @@ import { sendPrompt, cancelPrompt, isPromptActive } from "../prompt.js";
 
 const PROMPT_BODY_LIMIT = 15 * 1024 * 1024;
 
+/**
+ * Fastify plugin for prompt submission and management.
+ * 
+ * @param {import("fastify").FastifyInstance} fastify - Fastify instance
+ */
 export default async function promptRoutes(fastify) {
   fastify.post("/api/sessions/:sessionId/prompt", { bodyLimit: PROMPT_BODY_LIMIT }, async (req, reply) => {
     const { prompt, permissionMode, image } = req.body ?? {};

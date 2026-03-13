@@ -18,7 +18,20 @@ import {
 import { parseWorktreeListPorcelain } from "../../git-worktree.js";
 import { runGit } from "@agent-dashboard/diff-panel/server";
 
+/**
+ * Fastify plugin for worktree listing routes.
+ * 
+ * @param {import("fastify").FastifyInstance} fastify - Fastify instance
+ */
 export default async function worktreeListRoutes(fastify) {
+  /**
+   * GET /api/sessions/:id/worktrees
+   * 
+   * List worktrees for a session with auto-discovery of unregistered git worktree branches.
+   * 
+   * @route GET /api/sessions/:sessionId/worktrees
+   * @param {import("fastify").FastifyRequest} req - Fastify request
+   */
   fastify.get("/api/sessions/:sessionId/worktrees", async (req) => {
     const sessionId = lookupSessionId(req.params.sessionId);
     const session = getSession.get({ $id: sessionId });

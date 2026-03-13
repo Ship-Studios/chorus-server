@@ -13,26 +13,15 @@ import { isPromptActive, cancelPrompt, getActiveSwarmAgents, hasActiveSwarmAgent
 import { startWatching, stopWatching } from "../git-watcher.js";
 
 /**
- * Session lifecycle routes — registration, heartbeat, stop, list, and deletion.
- *
- * Sessions are the central identity concept in the dashboard. A single dashboard
- * session may aggregate multiple Claude CLI invocations (reconnects, resumes) for
- * the same project via the alias resolution system in session-resolver.js.
- *
- * @param {import("fastify").FastifyInstance} fastify
+ * Fastify plugin for session lifecycle routes.
+ * 
+ * @param {import("fastify").FastifyInstance} fastify - Fastify instance
  */
 export default async function sessionRoutes(fastify) {
   /**
    * Register or heartbeat a session.
    *
-   * Called by the SessionStart hook on every Claude CLI invocation. Uses
-   * resolveSessionId() to merge multiple CLI sessions for the same project
-   * into one dashboard session. Swarm agents (identified by body.agentId)
-   * bypass alias resolution to keep their own isolated session.
-   *
-   * Also detects worktree sessions (project_dir mismatch with existing session)
-   * and stores the worktree path separately so diffs always run against the
-   * main project directory.
+   * @route POST /api/sessions
    */
   fastify.post("/api/sessions", async (req, reply) => {
     const body = req.body ?? {};
@@ -116,9 +105,7 @@ export default async function sessionRoutes(fastify) {
   /**
    * Mark a session as stopped.
    *
-   * Called by the Stop HTTP hook when Claude CLI exits. Intentionally ignores
-   * stop signals while a prompt subprocess is active — the subprocess exit
-   * fires its own Stop hook, but the parent session is still alive.
+   * @route POST /api/sessions/:sessionId/stop
    */
   fastify.post("/api/sessions/:sessionId/stop", {
     config: { rawBody: true },
@@ -141,20 +128,17 @@ export default async function sessionRoutes(fastify) {
     },
   });
 
-  /** List the 50 most recent sessions, ordered by last_seen_at descending. */
+  /**
+   * List the 50 most recent sessions, ordered by last_seen_at descending.
+   * 
+   * @route GET /api/sessions
+   */
   fastify.get("/api/sessions", async () => getAllSessions.all());
 
   /**
    * Force-delete a session and all associated data.
    *
-   * Unlike the stop endpoint, this performs a full teardown: cancels any
-   * running prompt or swarm agents, stops the git file watcher, marks the
-   * session as stopped, then cascades deletion through events, agents,
-   * aliases, worktrees, and the session row itself.
-   *
-   * Active sessions are allowed — the hook-based stop signal is best-effort
-   * and may never arrive (crash, kill -9, network failure), so the UI must
-   * be able to clean up zombie sessions.
+   * @route DELETE /api/sessions/:sessionId
    */
   fastify.delete("/api/sessions/:sessionId", async (req, reply) => {
     const sessionId = lookupSessionId(req.params.sessionId);
@@ -184,3 +168,4 @@ export default async function sessionRoutes(fastify) {
     return { ok: true };
   });
 }
+

@@ -35,10 +35,22 @@ import { getAnthropicFetchOptions } from "../vpn.js";
 const cache = new Map(); // Map<hash, { summary, model, timestamp }>
 const CACHE_TTL_MS = 600_000; // 10 minutes — safe because cache is keyed on diff content hash
 
+/**
+ * Generate a SHA-256 hash of the diff content.
+ *
+ * @param {string} diff - The diff content to hash.
+ * @returns {string} The hex-encoded hash.
+ */
 function hashDiff(diff) {
   return createHash("sha256").update(diff).digest("hex");
 }
 
+/**
+ * Get a cached summary for a given diff hash, checking for TTL.
+ *
+ * @param {string} hash - The hash of the diff content.
+ * @returns {object|null} The cached entry if valid, otherwise null.
+ */
 function getCached(hash) {
   const entry = cache.get(hash);
   if (!entry) return null;
@@ -55,6 +67,11 @@ function getCached(hash) {
 // ── Anthropic client (lazy init) ────────────────────────────────────────────
 let client = null;
 
+/**
+ * Get the Anthropic client, lazily initializing it if needed.
+ *
+ * @returns {Anthropic|null} The Anthropic client, or null if API key is missing.
+ */
 function getClient() {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   if (!client) client = new Anthropic({ ...getAnthropicFetchOptions() });
@@ -64,6 +81,11 @@ function getClient() {
 /** Reset cached client so next call picks up new VPN/proxy config. */
 export function resetClient() { client = null; }
 
+/**
+ * Fastify plugin for diff summary routes.
+ *
+ * @param {import("fastify").FastifyInstance} fastify - The Fastify instance.
+ */
 export default async function diffSummaryRoutes(fastify) {
   // Feature availability check
   fastify.get("/api/diff-summary/status", async () => ({

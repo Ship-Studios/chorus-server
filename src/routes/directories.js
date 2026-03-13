@@ -9,6 +9,11 @@ import { homedir } from "node:os";
 
 const CODE_DIR = process.env.PULSE_ROOT_DIR || join(homedir(), "Documents", "code");
 
+/**
+ * Fastify plugin for directory routes.
+ *
+ * @param {import("fastify").FastifyInstance} fastify - The Fastify instance.
+ */
 export default async function directoryRoutes(fastify) {
   fastify.get("/api/directories", async (_req, reply) => {
     try {

@@ -22,7 +22,21 @@ import { parseWorktreeListPorcelain } from "../../git-worktree.js";
 import { deleteBranch, detectConflicts, removeWorktree } from "../../prompt.js";
 import { runGit } from "@agent-dashboard/diff-panel/server";
 
+/**
+ * Fastify plugin for worktree mutation routes.
+ * 
+ * @param {import("fastify").FastifyInstance} fastify - Fastify instance
+ */
 export default async function worktreeMutationRoutes(fastify) {
+  /**
+   * POST /api/worktrees/:id/merge
+   * 
+   * Merge branch via git merge --no-ff, then delete branch.
+   * 
+   * @route POST /api/worktrees/:worktreeId/merge
+   * @param {import("fastify").FastifyRequest} req - Fastify request
+   * @param {import("fastify").FastifyReply} reply - Fastify reply
+   */
   fastify.post("/api/worktrees/:worktreeId/merge", async (req, reply) => {
     const wt = getWorktree.get({ $id: Number(req.params.worktreeId) });
     if (!wt) return reply.code(404).send({ error: "Worktree not found" });
@@ -48,6 +62,15 @@ export default async function worktreeMutationRoutes(fastify) {
     }
   });
 
+  /**
+   * DELETE /api/worktrees/:id
+   * 
+   * Remove worktree checkout, delete branch, remove DB record.
+   * 
+   * @route DELETE /api/worktrees/:worktreeId
+   * @param {import("fastify").FastifyRequest} req - Fastify request
+   * @param {import("fastify").FastifyReply} reply - Fastify reply
+   */
   fastify.delete("/api/worktrees/:worktreeId", async (req, reply) => {
     const wt = getWorktree.get({ $id: Number(req.params.worktreeId) });
     if (!wt) return reply.code(404).send({ error: "Worktree not found" });
@@ -78,6 +101,15 @@ export default async function worktreeMutationRoutes(fastify) {
     return { ok: true };
   });
 
+  /**
+   * POST /api/worktrees/:id/check-conflicts
+   * 
+   * Non-destructive conflict detection via git merge-tree.
+   * 
+   * @route POST /api/worktrees/:worktreeId/check-conflicts
+   * @param {import("fastify").FastifyRequest} req - Fastify request
+   * @param {import("fastify").FastifyReply} reply - Fastify reply
+   */
   fastify.post("/api/worktrees/:worktreeId/check-conflicts", async (req, reply) => {
     const wt = getWorktree.get({ $id: Number(req.params.worktreeId) });
     if (!wt) return reply.code(404).send({ error: "Worktree not found" });

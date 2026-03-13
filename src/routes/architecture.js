@@ -18,6 +18,11 @@
 import { getSession, lookupSessionId } from "../db.js";
 import { getArchitecture } from "../architecture.js";
 
+/**
+ * Fastify plugin for architecture routes.
+ *
+ * @param {import("fastify").FastifyInstance} fastify - The Fastify instance.
+ */
 export default async function architectureRoutes(fastify) {
   fastify.get("/api/sessions/:id/architecture", async (req, reply) => {
     const sessionId = lookupSessionId(req.params.id);

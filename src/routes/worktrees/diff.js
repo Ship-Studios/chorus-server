@@ -11,7 +11,21 @@ import { existsSync } from "node:fs";
 import { getSession, getWorktree } from "../../db.js";
 import { parseDiffToFiles, buildStatSummary, runGit } from "@agent-dashboard/diff-panel/server";
 
+/**
+ * Fastify plugin for worktree diff routes.
+ * 
+ * @param {import("fastify").FastifyInstance} fastify - Fastify instance
+ */
 export default async function worktreeDiffRoutes(fastify) {
+  /**
+   * GET /api/worktrees/:id/diff
+   * 
+   * Three-dot diff of branch against base.
+   * 
+   * @route GET /api/worktrees/:worktreeId/diff
+   * @param {import("fastify").FastifyRequest} req - Fastify request
+   * @param {import("fastify").FastifyReply} reply - Fastify reply
+   */
   fastify.get("/api/worktrees/:worktreeId/diff", async (req, reply) => {
     const wt = getWorktree.get({ $id: Number(req.params.worktreeId) });
     if (!wt) return reply.code(404).send({ error: "Worktree not found" });
@@ -47,6 +61,15 @@ export default async function worktreeDiffRoutes(fastify) {
     }
   });
 
+  /**
+   * GET /api/worktrees/:id/files
+   * 
+   * Changed file list (git diff --name-status).
+   * 
+   * @route GET /api/worktrees/:worktreeId/files
+   * @param {import("fastify").FastifyRequest} req - Fastify request
+   * @param {import("fastify").FastifyReply} reply - Fastify reply
+   */
   fastify.get("/api/worktrees/:worktreeId/files", async (req, reply) => {
     const wt = getWorktree.get({ $id: Number(req.params.worktreeId) });
     if (!wt) return reply.code(404).send({ error: "Worktree not found" });

@@ -222,6 +222,13 @@ export async function scanArchitecture(projectDir) {
 
 // ── Tree builder ────────────────────────────────────────────────────────────
 
+/**
+ * Builds a hierarchical directory tree from a flat list of files.
+ *
+ * @param {string} projectDir - The absolute path to the project root.
+ * @param {Array<{relPath: string, ext: string, fullPath: string}>} files - A list of discovered files.
+ * @returns {ArchNode} The root node of the architectural tree.
+ */
 function buildDirectoryTree(projectDir, files) {
   const projectName = basename(projectDir);
 
@@ -257,6 +264,11 @@ function buildDirectoryTree(projectDir, files) {
   }
 
   let colorIdx = 0;
+  /**
+   * Returns the next color from the palette for group differentiation.
+   *
+   * @returns {{primary: string, mid: string, light: string}} A color object.
+   */
   function nextColor() {
     const c = PALETTE[colorIdx % PALETTE.length];
     colorIdx++;
@@ -264,6 +276,15 @@ function buildDirectoryTree(projectDir, files) {
   }
 
   // Recursively build ArchNode tree
+  /**
+   * Recursively builds an architectural node for a directory or file.
+   *
+   * @param {string} dirPath - The relative path of the directory.
+   * @param {string} name - The name of the directory or file.
+   * @param {{primary: string, mid: string, light: string}} colors - The color scheme for this node.
+   * @param {number} depth - The current recursion depth.
+   * @returns {ArchNode|null} The architectural node, or null if empty.
+   */
   function buildNode(dirPath, name, colors, depth) {
     const info = dirMap.get(dirPath);
     if (!info) return null;
@@ -351,6 +372,12 @@ function buildDirectoryTree(projectDir, files) {
 
 // ── Alias detection ─────────────────────────────────────────────────────────
 
+/**
+ * Detects common path aliases in the project (e.g., $lib, @, ~).
+ *
+ * @param {Array<{relPath: string}>} files - A list of discovered files.
+ * @returns {Map<string, string>} A map from alias prefix to its relative path replacement.
+ */
 function detectAliases(files) {
   const aliases = new Map();
 
@@ -390,6 +417,14 @@ function detectAliases(files) {
 
 // ── Flow resolver ───────────────────────────────────────────────────────────
 
+/**
+ * Resolves import relationships into cross-group data flows.
+ *
+ * @param {Array<{relPath: string, ext: string}>} files - A list of discovered files.
+ * @param {Map<string, Set<string>>} fileImports - A map from file relative path to its set of import specifiers.
+ * @param {string} projectDir - The absolute path to the project root.
+ * @returns {Flow[]} A list of resolved data flows between directory groups.
+ */
 function resolveFlows(files, fileImports, projectDir) {
   // Build a lookup from possible import specifiers to file relative paths
   const specToFile = new Map();
@@ -425,8 +460,12 @@ function resolveFlows(files, fileImports, projectDir) {
     }
   }
 
-  // Find the "interesting" grouping level: directories that have sibling directories
-  // (i.e., directories that share a parent). These are the natural flow endpoints.
+  /**
+   * Finds the nearest architectural grouping directory for a file.
+   *
+   * @param {string} filePath - The relative path of the file.
+   * @returns {string} The relative path of the group directory.
+   */
   function nearestGroupDir(filePath) {
     const parts = filePath.split("/");
     // Walk up from the file's parent directory
@@ -507,6 +546,12 @@ function resolveFlows(files, fileImports, projectDir) {
 let _groupDepth = 0;
 let _groupDepthComputed = false;
 
+/**
+ * Computes the logical depth for architectural grouping based on project structure.
+ * Handles monorepo patterns (e.g., packages/*) automatically.
+ *
+ * @param {Array<{relPath: string}>} files - A list of discovered files.
+ */
 function computeGroupDepth(files) {
   if (_groupDepthComputed) return;
   _groupDepthComputed = true;
@@ -530,6 +575,12 @@ function computeGroupDepth(files) {
   }
 }
 
+/**
+ * Returns the top-level grouping directory for a relative path.
+ *
+ * @param {string} relPath - The relative path of a file or directory.
+ * @returns {string|null} The name or path of the top-level group.
+ */
 function topGroup(relPath) {
   const parts = relPath.split("/");
   if (_groupDepth > 0 && parts.length > _groupDepth + 1) {
@@ -538,6 +589,13 @@ function topGroup(relPath) {
   return parts[0] || null;
 }
 
+/**
+ * Resolves a relative import specifier to a project-root-relative path.
+ *
+ * @param {string} fromDir - The directory containing the file with the import.
+ * @param {string} specifier - The relative import specifier (e.g., "../utils").
+ * @returns {string} The resolved project-root-relative path.
+ */
 function resolveRelative(fromDir, specifier) {
   const parts = fromDir.split("/").filter(Boolean);
   const specParts = specifier.split("/");
@@ -556,6 +614,12 @@ function resolveRelative(fromDir, specifier) {
 const cache = new Map();
 const CACHE_TTL = 30_000; // 30 seconds
 
+/**
+ * Retrieves the project architecture, using a cache to avoid redundant scans.
+ *
+ * @param {string} projectDir - The absolute path to the project root.
+ * @returns {Promise<{ tree: ArchNode, flows: Flow[] }>} The architectural tree and data-flow edges.
+ */
 export async function getArchitecture(projectDir) {
   const now = Date.now();
   const cached = cache.get(projectDir);

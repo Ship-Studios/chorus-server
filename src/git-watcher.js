@@ -9,6 +9,9 @@ const watchers = new Map();
 /**
  * Start watching a project directory's .git internals for changes.
  * Deduplicates by directory — multiple sessions on the same repo share one watcher.
+ *
+ * @param {string} sessionId - The ID of the session.
+ * @param {string} projectDir - The directory to watch.
  */
 export function startWatching(sessionId, projectDir) {
   if (!projectDir || projectDir === "unknown") return;
@@ -56,6 +59,9 @@ export function startWatching(sessionId, projectDir) {
 
 /**
  * Stop watching for a session. Closes the watcher if no sessions remain.
+ *
+ * @param {string} sessionId - The ID of the session.
+ * @param {string} projectDir - The directory that was being watched.
  */
 export function stopWatching(sessionId, projectDir) {
   if (!projectDir || !watchers.has(projectDir)) return;
@@ -71,6 +77,8 @@ export function stopWatching(sessionId, projectDir) {
 
 /**
  * Restore watchers for all sessions on server startup.
+ *
+ * @param {Array<object>} sessions - A list of session objects.
  */
 export function initWatchers(sessions) {
   for (const session of sessions) {
@@ -83,7 +91,7 @@ export function initWatchers(sessions) {
 }
 
 /**
- * Close all watchers on server shutdown.
+ * Close all watchers on server shutdown to ensure a clean exit.
  */
 export function shutdownWatchers() {
   for (const [, entry] of watchers) {

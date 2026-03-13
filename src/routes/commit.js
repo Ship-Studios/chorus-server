@@ -30,6 +30,13 @@ const COMMIT_MSG_SYSTEM_PROMPT =
   "- An optional body (separated by a blank line) with 1-3 bullet points explaining key changes, only if the change is non-trivial\n" +
   "Return ONLY the commit message text, no markdown formatting, no code fences, no explanation.";
 
+/**
+ * Build the user prompt for single-repo commit message generation.
+ *
+ * @param {string} stat - The git stat summary.
+ * @param {string} diff - The git diff content.
+ * @returns {string} The formatted prompt.
+ */
 function buildCommitPrompt(stat, diff) {
   return (
     "Generate a commit message for this diff.\n\n" +
@@ -51,6 +58,12 @@ const SUBMODULE_COMMIT_MSG_SYSTEM_PROMPT =
   "Example: {\"packages/server\": \"feat: add VPN proxy support\", \"parent\": \"feat: VPN proxy support\"}\n" +
   "Return ONLY the JSON object, no markdown, no code fences.";
 
+/**
+ * Build the user prompt for monorepo/submodule commit message generation.
+ *
+ * @param {Array<{name: string, stat: string, diff: string}>} scopes - The list of scopes with their stats and diffs.
+ * @returns {string} The formatted prompt.
+ */
 function buildSubmoduleCommitPrompt(scopes) {
   const parts = ["Generate a commit message for each of the following scopes.\n"];
   for (const { name, stat, diff } of scopes) {
@@ -63,6 +76,11 @@ function buildSubmoduleCommitPrompt(scopes) {
  * Detect submodules with uncommitted changes.
  * Parses .gitmodules to find submodule paths, then checks each for dirty state.
  * Returns array of { path, absPath } for dirty submodules.
+ *
+ * @param {string} dir - The directory to check for submodules.
+ * @param {Function} runGitFn - The function to run git commands.
+ * @param {Function} existsSyncFn - The function to check if a file exists.
+ * @returns {Promise<Array<{path: string, absPath: string}>>} A list of dirty submodules.
  */
 async function getDirtySubmodules(dir, runGitFn, existsSyncFn) {
   let gitmodulesContent;
@@ -107,6 +125,12 @@ async function getDirtySubmodules(dir, runGitFn, existsSyncFn) {
   return submodules;
 }
 
+/**
+ * Truncate the diff if it exceeds the maximum allowed length.
+ *
+ * @param {string} diff - The diff content to truncate.
+ * @returns {string} The truncated diff.
+ */
 function truncateDiff(diff) {
   if (diff.length > MAX_DIFF_CHARS) {
     return diff.slice(0, MAX_DIFF_CHARS) + "\n\n[diff truncated]";
@@ -114,6 +138,12 @@ function truncateDiff(diff) {
   return diff;
 }
 
+/**
+ * Create a function to build a preview diff of all changes (staged + unstaged).
+ *
+ * @param {object} [deps={}] - Dependency overrides.
+ * @returns {Function} The buildPreviewDiff function.
+ */
 export function createBuildPreviewDiff(deps = {}) {
   const {
     runGit: runGitImpl = runGit,
@@ -162,6 +192,13 @@ const buildPreviewDiff = createBuildPreviewDiff();
 // ── Anthropic client (lazy init) ────────────────────────────────────────────
 let client = null;
 
+/**
+ * Get the Anthropic client, lazily initializing it if needed.
+ *
+ * @param {typeof Anthropic} AnthropicImpl - The Anthropic SDK constructor.
+ * @param {Function} getAnthropicFetchOptionsImpl - Function to get VPN fetch options.
+ * @returns {Anthropic|null} The Anthropic client, or null if API key is missing.
+ */
 function getClient(AnthropicImpl, getAnthropicFetchOptionsImpl) {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   if (!client) client = new AnthropicImpl({ ...getAnthropicFetchOptionsImpl() });
@@ -171,6 +208,12 @@ function getClient(AnthropicImpl, getAnthropicFetchOptionsImpl) {
 /** Reset cached client so next call picks up new VPN/proxy config. */
 export function resetClient() { client = null; }
 
+/**
+ * Create the commit routes Fastify plugin.
+ *
+ * @param {object} [deps={}] - Dependency overrides for testing.
+ * @returns {import("fastify").FastifyPluginAsync} The commit routes plugin.
+ */
 export function createCommitRoutes(deps = {}) {
   const {
     existsSync: existsSyncImpl = existsSync,

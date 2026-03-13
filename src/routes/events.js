@@ -47,6 +47,11 @@ import {
 } from "../db.js";
 import { isPromptActive } from "../prompt.js";
 
+/**
+ * Fastify plugin for event and hook routes.
+ *
+ * @param {import("fastify").FastifyInstance} fastify - The Fastify instance.
+ */
 export default async function eventRoutes(fastify) {
   // Hook: tool use event (file edit, bash command, etc.)
   fastify.post("/api/events", async (req, reply) => {

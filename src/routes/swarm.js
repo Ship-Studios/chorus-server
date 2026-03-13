@@ -35,26 +35,16 @@ const SPAWN_BODY_LIMIT = 15 * 1024 * 1024;
 /**
  * Registers swarm agent routes on the Fastify instance.
  *
- * @param {import('fastify').FastifyInstance} fastify
+ * @param {import('fastify').FastifyInstance} fastify - Fastify instance
  */
 export default async function swarmRoutes(fastify) {
   /**
-   * POST /api/sessions/:sessionId/swarm/spawn
-   *
    * Spawns an independent Claude Code agent attached to the given session.
-   *
-   * @body {string}  prompt          — The instruction for the agent (required)
-   * @body {string}  [description]   — Human-readable label (defaults to first 80 chars of prompt)
-   * @body {string}  [permissionMode] — One of: default, acceptEdits, bypassPermissions, plan, dontAsk
-   * @body {string}  [model]         — Claude model override (validated against /^[a-zA-Z0-9._/-]+$/)
-   * @body {boolean} [useWorktree]   — If true, run in an isolated git worktree branch
-   * @body {object}  [image]         — Optional image attachment: { data: string (base64), mimeType: string }
-   *
-   * @returns {{ ok: true, agentId: string }}
-   *
-   * @throws {400} prompt missing or session has no working directory
-   * @throws {404} session not found
-   * @throws {429} MAX_SWARM_AGENTS limit reached
+   * 
+   * @route POST /api/sessions/:sessionId/swarm/spawn
+   * @param {import("fastify").FastifyRequest} req - Fastify request
+   * @param {import("fastify").FastifyReply} reply - Fastify reply
+   * @returns {Promise<{ ok: boolean, agentId: string }>}
    */
   fastify.post("/api/sessions/:sessionId/swarm/spawn", { bodyLimit: SPAWN_BODY_LIMIT }, async (req, reply) => {
     const { prompt, description, permissionMode, model, useWorktree, image } = req.body ?? {};
@@ -149,14 +139,11 @@ export default async function swarmRoutes(fastify) {
   });
 
   /**
-   * POST /api/swarm/:agentId/cancel
-   *
    * Sends SIGTERM to a running swarm agent (escalates to SIGKILL after 3s).
-   * Does NOT broadcast `swarm:done` — the process close handler in
-   * swarm-manager.js is the single source of truth and emits it with
-   * `cancelled: true` once the process actually exits.
-   *
-   * @returns {{ ok: true, cancelled: boolean }}
+   * 
+   * @route POST /api/swarm/:agentId/cancel
+   * @param {import("fastify").FastifyRequest} req - Fastify request
+   * @returns {Promise<{ ok: boolean, cancelled: boolean }>}
    */
   fastify.post("/api/swarm/:agentId/cancel", async (req) => {
     const { cancelled } = cancelSwarmAgent(req.params.agentId);
@@ -164,12 +151,11 @@ export default async function swarmRoutes(fastify) {
   });
 
   /**
-   * GET /api/sessions/:sessionId/swarm
-   *
-   * Lists active (in-memory) swarm agents for a session. Only includes agents
-   * whose processes are still running — completed agents are not retained.
-   *
-   * @returns {Array<{ id: string, description: string, startedAt: number, status: string }>}
+   * Lists active (in-memory) swarm agents for a session.
+   * 
+   * @route GET /api/sessions/:sessionId/swarm
+   * @param {import("fastify").FastifyRequest} req - Fastify request
+   * @returns {Promise<Array<import("../prompt.js").SwarmAgent>>}
    */
   fastify.get("/api/sessions/:sessionId/swarm", async (req) => {
     const sessionId = lookupSessionId(req.params.sessionId);

@@ -47,6 +47,12 @@ import {
 const SYNTHESIS_MODEL = "claude-sonnet-4-6";
 
 let client = null;
+
+/**
+ * Get the Anthropic client, lazily initializing it if needed.
+ *
+ * @returns {Anthropic|null} The Anthropic client, or null if API key is missing.
+ */
 function getClient() {
   if (!process.env.ANTHROPIC_API_KEY) return null;
   if (!client) client = new Anthropic({ maxRetries: 3, timeout: 60_000, ...getAnthropicFetchOptions() });
@@ -56,6 +62,11 @@ function getClient() {
 /** Reset cached client so next call picks up new VPN/proxy config. */
 export function resetClient() { client = null; }
 
+/**
+ * Fastify plugin for crafting routes.
+ *
+ * @param {import("fastify").FastifyInstance} fastify - The Fastify instance.
+ */
 export default async function craftingRoutes(fastify) {
   // --- AI Status ---
 

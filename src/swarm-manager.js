@@ -285,6 +285,12 @@ export function getActiveSwarmAgents(sessionId) {
   return results;
 }
 
+/**
+ * Check if there are any active swarm agents, optionally filtered by parent session.
+ *
+ * @param {string} [sessionId] - The session ID to filter by
+ * @returns {boolean}
+ */
 export function hasActiveSwarmAgents(sessionId) {
   for (const agent of activeSwarmAgents.values()) {
     if (!sessionId || agent.sessionId === sessionId) {

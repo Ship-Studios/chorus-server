@@ -4,8 +4,9 @@ import { GIT } from "./git.js";
 
 /**
  * Slugify a description for use as a git branch name.
- * @param {string} desc
- * @returns {string}
+ *
+ * @param {string} desc - The description to slugify.
+ * @returns {string} The slugified branch name.
  */
 export function slugify(desc) {
   return desc
@@ -16,9 +17,10 @@ export function slugify(desc) {
 }
 
 /**
- * Get the current branch name of the repo.
- * @param {string} repoDir
- * @returns {string}
+ * Get the current branch name of the repository.
+ *
+ * @param {string} repoDir - The path to the git repository.
+ * @returns {string} The current branch name (defaults to 'main' on error).
  */
 export function getCurrentBranch(repoDir) {
   try {
@@ -37,9 +39,9 @@ export function getCurrentBranch(repoDir) {
  * Create a git worktree with a named branch from the given repo directory.
  * Returns { worktreePath, branchName, baseBranch } on success, or throws on failure.
  *
- * @param {string} repoDir - The git repository root
- * @param {string} id - Unique identifier for the worktree
- * @param {string} description - Human-readable description (used to generate branch name)
+ * @param {string} repoDir - The git repository root.
+ * @param {string} id - Unique identifier for the worktree.
+ * @param {string} description - Human-readable description (used to generate branch name).
  * @returns {{ worktreePath: string, branchName: string, baseBranch: string }}
  */
 export function createWorktree(repoDir, id, description) {
@@ -60,6 +62,12 @@ export function createWorktree(repoDir, id, description) {
   return { worktreePath, branchName, baseBranch };
 }
 
+/**
+ * Delay execution for a given number of milliseconds.
+ *
+ * @param {number} ms - The number of milliseconds to delay.
+ * @returns {Promise<void>}
+ */
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -150,14 +158,6 @@ export function getBranchDiffStats(repoDir, baseBranch, headBranch) {
 }
 
 /**
- * Check for merge conflicts between a branch and its base using git merge-tree.
- * Returns a conflict description string, or null if clean.
- * @param {string} repoDir
- * @param {string} baseBranch
- * @param {string} headBranch
- * @returns {string | null}
- */
-/**
  * Parse `git worktree list --porcelain` output into an array of { path, branch } entries.
  * Skips the first entry (always the main worktree).
  * @param {string} porcelainOutput - Raw output from `git worktree list --porcelain`
@@ -187,6 +187,14 @@ export function parseWorktreeListPorcelain(porcelainOutput) {
   return entries;
 }
 
+/**
+ * Check for merge conflicts between a branch and its base using git merge-tree.
+ * Returns a conflict description string, or null if clean.
+ * @param {string} repoDir
+ * @param {string} baseBranch
+ * @param {string} headBranch
+ * @returns {string | null}
+ */
 export function detectConflicts(repoDir, baseBranch, headBranch) {
   try {
     // git merge-tree --write-tree exits non-zero if there are conflicts
