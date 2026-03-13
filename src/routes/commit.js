@@ -240,7 +240,22 @@ export function createCommitRoutes(deps = {}) {
       // ── Submodule-aware commit cascade ──────────────────────────────
       // Detect dirty submodules and commit them first (inner→outer),
       // then commit the parent with updated submodule pointers.
-      const dirtySubmodules = await getDirtySubmodules(dir, runGitImpl, existsSyncImpl);
+      // When `body.submodules` is provided, only those paths are committed.
+      // When `body.skipParent` is true, the parent commit is skipped.
+      const { submodules: targetSubmodules, skipParent } = req.body ?? {};
+
+      let dirtySubmodules = await getDirtySubmodules(dir, runGitImpl, existsSyncImpl);
+
+      // Filter to requested submodules when specified
+      if (Array.isArray(targetSubmodules) && targetSubmodules.length > 0) {
+        dirtySubmodules = dirtySubmodules.filter(
+          (sub) => targetSubmodules.includes(sub.path),
+        );
+      }
+
+      if (dirtySubmodules.length === 0 && skipParent) {
+        return reply.code(400).send({ error: "No matching dirty submodules found" });
+      }
 
       if (dirtySubmodules.length === 0) {
         // Simple case: no submodules, commit directly
@@ -277,7 +292,10 @@ export function createCommitRoutes(deps = {}) {
       }
 
       // Add parent repo diff (excluding submodule content — just pointer changes + own files)
-      scopes.push({ name: "parent", stat, diff: truncatedDiff, absPath: dir });
+      // Omitted when the client is committing only child submodules.
+      if (!skipParent) {
+        scopes.push({ name: "parent", stat, diff: truncatedDiff, absPath: dir });
+      }
 
       // Generate per-scope commit messages in one AI call
       let scopeMessages;
@@ -314,6 +332,21 @@ export function createCommitRoutes(deps = {}) {
       }
 
       // Commit parent (stages updated submodule pointers + own changes)
+      // Skipped when the client requests child-only commits.
+      if (skipParent) {
+        broadcastImpl({ type: "diff:invalidated", sessionId });
+        return {
+          ok: true,
+          message: committed.length
+            ? `Committed ${committed.length} submodule${committed.length > 1 ? "s" : ""}`
+            : "No submodule changes committed",
+          stat,
+          filesChanged: files.length,
+          childOnly: true,
+          submoduleCommits: committed.map(name => ({ name, message: scopeMessages[name] || commitMessage })),
+        };
+      }
+
       const parentMsg = scopeMessages["parent"] || commitMessage;
       try {
         await runGitImpl(dir, ["add", "-A"]);
