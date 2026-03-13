@@ -1,123 +1,139 @@
-import { describe, expect, it, beforeEach, mock } from "bun:test";
-import { wsClients, broadcast } from "./broadcast.js";
+import { describe, expect, it, beforeEach } from "bun:test";
+import { setIO } from "./socket.js";
+import { broadcast, broadcastToSession, debouncedDiffInvalidation, clearDiffTimers } from "./broadcast.js";
 
 /**
- * Tests for the WebSocket broadcast utility.
- * Uses plain objects mimicking the WebSocket interface (readyState + send).
+ * Tests for the Socket.IO broadcast utilities.
+ *
+ * Uses setIO() to inject a mock Socket.IO server instance,
+ * then asserts on captured emit calls.
  */
 
-function mockSocket(readyState = 1) {
-  return {
-    readyState,
-    sent: [],
-    send(data) {
-      this.sent.push(data);
-    },
-  };
-}
+let emitted;
+let roomEmitted;
 
-function mockSocketThatThrows(readyState = 1) {
-  return {
-    readyState,
-    send() {
-      throw new Error("connection reset");
+function installMockIO() {
+  emitted = [];
+  roomEmitted = [];
+  setIO({
+    emit(event, data) {
+      emitted.push({ event, data });
     },
-  };
+    to(room) {
+      return {
+        emit(event, data) {
+          roomEmitted.push({ room, event, data });
+        },
+      };
+    },
+  });
 }
 
 describe("broadcast", () => {
   beforeEach(() => {
-    wsClients.clear();
+    installMockIO();
+    clearDiffTimers();
   });
 
-  it("sends JSON to all open clients", () => {
-    const a = mockSocket();
-    const b = mockSocket();
-    wsClients.add(a);
-    wsClients.add(b);
-
+  it("emits message to all clients via io.emit", () => {
     broadcast({ type: "test", value: 42 });
-
-    const expected = JSON.stringify({ type: "test", value: 42 });
-    expect(a.sent).toEqual([expected]);
-    expect(b.sent).toEqual([expected]);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]).toEqual({
+      event: "message",
+      data: { type: "test", value: 42 },
+    });
   });
 
-  it("skips clients with readyState !== 1 (OPEN)", () => {
-    const open = mockSocket(1);
-    const connecting = mockSocket(0);
-    const closing = mockSocket(2);
-    const closed = mockSocket(3);
-    wsClients.add(open);
-    wsClients.add(connecting);
-    wsClients.add(closing);
-    wsClients.add(closed);
-
-    broadcast({ type: "ping" });
-
-    expect(open.sent).toHaveLength(1);
-    expect(connecting.sent).toHaveLength(0);
-    expect(closing.sent).toHaveLength(0);
-    expect(closed.sent).toHaveLength(0);
-  });
-
-  it("removes clients that throw on send", () => {
-    const good = mockSocket();
-    const bad = mockSocketThatThrows();
-    wsClients.add(good);
-    wsClients.add(bad);
-
-    broadcast({ type: "test" });
-
-    expect(good.sent).toHaveLength(1);
-    expect(wsClients.has(bad)).toBe(false);
-    expect(wsClients.has(good)).toBe(true);
-  });
-
-  it("does nothing when no clients are connected", () => {
+  it("does nothing when io is null", () => {
+    setIO(null);
     // Should not throw
-    broadcast({ type: "empty" });
-    expect(wsClients.size).toBe(0);
+    broadcast({ type: "test" });
+    expect(emitted).toHaveLength(0);
   });
 
   it("sends multiple broadcasts independently", () => {
-    const client = mockSocket();
-    wsClients.add(client);
-
     broadcast({ type: "first" });
     broadcast({ type: "second" });
+    expect(emitted).toHaveLength(2);
+    expect(emitted[0].data.type).toBe("first");
+    expect(emitted[1].data.type).toBe("second");
+  });
+});
 
-    expect(client.sent).toHaveLength(2);
-    expect(JSON.parse(client.sent[0]).type).toBe("first");
-    expect(JSON.parse(client.sent[1]).type).toBe("second");
+describe("broadcastToSession", () => {
+  beforeEach(() => {
+    installMockIO();
+    clearDiffTimers();
   });
 
-  it("terminates slow client with high bufferedAmount", () => {
-    const normalClient = { readyState: 1, bufferedAmount: 0, send: mock(() => {}), terminate: mock(() => {}) };
-    const slowClient = { readyState: 1, bufferedAmount: 2_000_000, send: mock(() => {}), terminate: mock(() => {}) };
-
-    wsClients.add(normalClient);
-    wsClients.add(slowClient);
-
-    broadcast({ type: "test" });
-
-    expect(normalClient.send).toHaveBeenCalled();
-    expect(slowClient.send).not.toHaveBeenCalled();
-    expect(slowClient.terminate).toHaveBeenCalled();
-    expect(wsClients.has(slowClient)).toBe(false);
-    expect(wsClients.has(normalClient)).toBe(true);
+  it("emits to the correct session room", () => {
+    broadcastToSession("sess-123", { type: "prompt:chunk", sessionId: "sess-123", chunk: {} });
+    expect(roomEmitted).toHaveLength(1);
+    expect(roomEmitted[0]).toEqual({
+      room: "session:sess-123",
+      event: "message",
+      data: { type: "prompt:chunk", sessionId: "sess-123", chunk: {} },
+    });
   });
 
-  it("removes CLOSED-state clients from wsClients", () => {
-    const closedClient = { readyState: 3, send: mock(() => {}), terminate: mock(() => {}) };
-    const openClient = { readyState: 1, bufferedAmount: 0, send: mock(() => {}), terminate: mock(() => {}) };
+  it("does not emit globally when targeting a session", () => {
+    broadcastToSession("sess-456", { type: "diff:invalidated", sessionId: "sess-456" });
+    expect(emitted).toHaveLength(0);
+    expect(roomEmitted).toHaveLength(1);
+  });
 
-    wsClients.add(closedClient);
-    wsClients.add(openClient);
+  it("targets different rooms for different sessions", () => {
+    broadcastToSession("sess-A", { type: "prompt:chunk", sessionId: "sess-A" });
+    broadcastToSession("sess-B", { type: "prompt:chunk", sessionId: "sess-B" });
+    expect(roomEmitted).toHaveLength(2);
+    expect(roomEmitted[0].room).toBe("session:sess-A");
+    expect(roomEmitted[1].room).toBe("session:sess-B");
+  });
 
-    broadcast({ type: "test" });
+  it("does nothing when io is null", () => {
+    setIO(null);
+    broadcastToSession("sess-X", { type: "test" });
+    expect(roomEmitted).toHaveLength(0);
+  });
+});
 
-    expect(wsClients.has(closedClient)).toBe(false);
-    expect(openClient.send).toHaveBeenCalled();
+describe("debouncedDiffInvalidation", () => {
+  beforeEach(() => {
+    installMockIO();
+    clearDiffTimers();
+  });
+
+  it("broadcasts to session room after debounce", async () => {
+    debouncedDiffInvalidation("sess-789");
+    expect(roomEmitted).toHaveLength(0);
+    await new Promise((r) => setTimeout(r, 350));
+    expect(roomEmitted).toHaveLength(1);
+    expect(roomEmitted[0].room).toBe("session:sess-789");
+    expect(roomEmitted[0].data.type).toBe("diff:invalidated");
+  });
+
+  it("coalesces multiple calls for the same session", async () => {
+    debouncedDiffInvalidation("sess-coalesce");
+    debouncedDiffInvalidation("sess-coalesce");
+    debouncedDiffInvalidation("sess-coalesce");
+    await new Promise((r) => setTimeout(r, 350));
+    expect(roomEmitted).toHaveLength(1);
+  });
+
+  it("debounces independently per session", async () => {
+    debouncedDiffInvalidation("sess-X");
+    debouncedDiffInvalidation("sess-Y");
+    await new Promise((r) => setTimeout(r, 350));
+    expect(roomEmitted).toHaveLength(2);
+    const rooms = roomEmitted.map((e) => e.room);
+    expect(rooms).toContain("session:sess-X");
+    expect(rooms).toContain("session:sess-Y");
+  });
+
+  it("clearDiffTimers cancels pending debounces", async () => {
+    debouncedDiffInvalidation("sess-cleared");
+    clearDiffTimers();
+    await new Promise((r) => setTimeout(r, 350));
+    expect(roomEmitted).toHaveLength(0);
   });
 });

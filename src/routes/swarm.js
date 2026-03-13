@@ -18,7 +18,7 @@
  * @see {@link ../git-worktree.js} for git worktree create/remove/diff utilities
  */
 
-import { broadcast, debouncedDiffInvalidation } from "../broadcast.js";
+import { broadcastToSession, debouncedDiffInvalidation } from "../broadcast.js";
 import {
   getSession,
   lookupSessionId,
@@ -120,12 +120,12 @@ export default async function swarmRoutes(fastify) {
             }
 
             const worktreeRow = getWorktree.get({ $id: worktreeDbId });
-            broadcast({ type: "worktree:ready", worktree: worktreeRow, parentSessionId: sessionId });
+            broadcastToSession(sessionId, { type: "worktree:ready", worktree: worktreeRow, parentSessionId: sessionId });
 
             // Strip redundant worktree stats from swarm:done — the worktree:ready message
             // already carries the full record; clients don't need the raw stats twice.
             const { worktree: _discard, ...eventWithoutWorktree } = event;
-            broadcast({ ...eventWithoutWorktree, parentSessionId: sessionId });
+            broadcastToSession(sessionId, { ...eventWithoutWorktree, parentSessionId: sessionId });
             debouncedDiffInvalidation(sessionId);
             return; // Don't fall through to the generic broadcast
           }
@@ -134,7 +134,7 @@ export default async function swarmRoutes(fastify) {
           if (event.type === "swarm:done") {
             debouncedDiffInvalidation(sessionId);
           }
-          broadcast({ ...event, parentSessionId: sessionId });
+          broadcastToSession(sessionId, { ...event, parentSessionId: sessionId });
         },
       ));
     } catch (err) {
@@ -144,7 +144,7 @@ export default async function swarmRoutes(fastify) {
       throw err;
     }
 
-    broadcast({ type: "swarm:spawned", agentId, parentSessionId: sessionId, description: agentDescription, startedAt: Date.now(), worktree: !!useWorktree });
+    broadcastToSession(sessionId, { type: "swarm:spawned", agentId, parentSessionId: sessionId, description: agentDescription, startedAt: Date.now(), worktree: !!useWorktree });
     return { ok: true, agentId };
   });
 

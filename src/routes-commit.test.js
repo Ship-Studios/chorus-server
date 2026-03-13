@@ -36,6 +36,9 @@ mock.module("./broadcast.js", () => ({
   broadcast(message) {
     broadcastCalls.push(message);
   },
+  broadcastToSession(sessionId, message) {
+    broadcastCalls.push(message);
+  },
 }));
 
 mock.module("./vpn.js", () => ({

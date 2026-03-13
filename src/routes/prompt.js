@@ -27,7 +27,7 @@
 import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { broadcast, debouncedDiffInvalidation } from "../broadcast.js";
+import { broadcastToSession, debouncedDiffInvalidation } from "../broadcast.js";
 import { getSession, lookupSessionId } from "../db.js";
 import { sendPrompt, cancelPrompt, isPromptActive } from "../prompt.js";
 
@@ -71,15 +71,15 @@ export default async function promptRoutes(fastify) {
     // Use the stored CLI session ID for --resume (not the dashboard's internal ID)
     const claudeSessionId = session.current_claude_session_id || req.params.sessionId;
 
-    broadcast({ type: "prompt:start", sessionId, prompt: finalPrompt, hasImage: !!imagePath, permissionMode: permissionMode || null });
+    broadcastToSession(sessionId, { type: "prompt:start", sessionId, prompt: finalPrompt, hasImage: !!imagePath, permissionMode: permissionMode || null });
 
     try {
       sendPrompt(
         sessionId,
         { prompt: finalPrompt, cwd, claudeSessionId, permissionMode },
-        (chunk) => broadcast({ type: "prompt:chunk", sessionId, chunk }),
+        (chunk) => broadcastToSession(sessionId, { type: "prompt:chunk", sessionId, chunk }),
         (result) => {
-          broadcast({ type: "prompt:done", sessionId, exitCode: result.code, cancelled: result.cancelled, error: result.error, freshSession: result.freshSession || false });
+          broadcastToSession(sessionId, { type: "prompt:done", sessionId, exitCode: result.code, cancelled: result.cancelled, error: result.error, freshSession: result.freshSession || false });
           // Prompt may have modified files — signal diff refresh
           debouncedDiffInvalidation(sessionId);
           // Clean up the temp screenshot file once the prompt is done
@@ -89,7 +89,7 @@ export default async function promptRoutes(fastify) {
         },
       );
     } catch (err) {
-      broadcast({ type: "prompt:done", sessionId, exitCode: null, error: err.message });
+      broadcastToSession(sessionId, { type: "prompt:done", sessionId, exitCode: null, error: err.message });
       debouncedDiffInvalidation(sessionId);
       return reply.code(500).send({ error: err.message });
     }

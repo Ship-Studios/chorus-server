@@ -10,7 +10,7 @@
  * @module routes/worktrees/mutations
  */
 import { existsSync } from "node:fs";
-import { broadcast } from "../../broadcast.js";
+import { broadcastToSession } from "../../broadcast.js";
 import {
   getSession,
   getWorktree,
@@ -41,7 +41,7 @@ export default async function worktreeMutationRoutes(fastify) {
       deleteBranch(dir, wt.branch_name);
       updateWorktreeStatus.run({ $id: wt.id, $status: "merged" });
       const updated = getWorktree.get({ $id: wt.id });
-      broadcast({ type: "worktree:updated", worktree: updated, parentSessionId: wt.session_id });
+      broadcastToSession(wt.session_id, { type: "worktree:updated", worktree: updated, parentSessionId: wt.session_id });
       return { ok: true, status: "merged" };
     } catch (err) {
       return reply.code(500).send({ error: `Merge failed: ${err.message}` });
@@ -74,7 +74,7 @@ export default async function worktreeMutationRoutes(fastify) {
     }
 
     deleteWorktreeRow.run({ $id: wt.id });
-    broadcast({ type: "worktree:removed", worktreeId: wt.id, parentSessionId: wt.session_id });
+    broadcastToSession(wt.session_id, { type: "worktree:removed", worktreeId: wt.id, parentSessionId: wt.session_id });
     return { ok: true };
   });
 
@@ -93,7 +93,7 @@ export default async function worktreeMutationRoutes(fastify) {
     const conflictInfo = detectConflicts(dir, wt.base_branch, wt.branch_name);
     updateWorktreeConflicts.run({ $id: wt.id, $conflictInfo: conflictInfo });
     const updated = getWorktree.get({ $id: wt.id });
-    broadcast({ type: "worktree:updated", worktree: updated, parentSessionId: wt.session_id });
+    broadcastToSession(wt.session_id, { type: "worktree:updated", worktree: updated, parentSessionId: wt.session_id });
     return { ok: true, conflicts: !!conflictInfo, conflictInfo };
   });
 }

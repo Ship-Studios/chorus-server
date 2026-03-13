@@ -13,10 +13,10 @@
  *  6. Serve the pre-built SvelteKit UI as static files in production.
  *
  * Startup lifecycle (order matters):
- *   imports → Fastify instance → CORS + WS plugins → WebSocket handler →
- *   heartbeat timer → route registration → session dedup → health/vpn routes →
- *   git watchers → static file serving → empty-body JSON parser →
- *   VPN detection → listen
+ *   imports → Fastify instance → CORS plugin → route registration →
+ *   session dedup → health/vpn routes → git watchers → static file serving →
+ *   empty-body JSON parser → VPN detection → app.ready() → Socket.IO init →
+ *   listen
  *
  * Environment variables:
  *   PORT            — Listen port (default 3001)
@@ -33,8 +33,8 @@
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
+import { Server as SocketIO } from "socket.io";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,12 +44,12 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 
 /**
- * WebSocket client tracking and broadcast utilities.
- * - `wsClients`: Set of active WebSocket connections, shared across modules.
- * - `broadcast(msg)`: Serializes and sends to all connected clients.
- *   Terminates slow clients whose send buffer exceeds 1MB.
+ * Broadcast utilities for Socket.IO.
+ * - `broadcast(msg)`: Emits to all connected clients (global events).
+ * - `broadcastToSession(sessionId, msg)`: Emits to clients in a session room.
  */
-import { wsClients, broadcast, clearDiffTimers } from "./broadcast.js";
+import { clearDiffTimers } from "./broadcast.js";
+import { setIO } from "./socket.js";
 
 /**
  * Database access — prepared statements and session management.
@@ -149,103 +149,33 @@ const PORT = process.env.PORT ?? 3001;
 // ---------------------------------------------------------------------------
 // App instance & core plugins
 // ---------------------------------------------------------------------------
-// Fastify is created with Pino logging enabled. Two core plugins are registered
-// first because all subsequent route handlers depend on them:
-//   - @fastify/cors: Allows cross-origin requests from the SvelteKit dev server
-//     (port 5173) to the API server (port 3001) during development.
-//   - @fastify/websocket: Provides the WebSocket upgrade handler used by `/ws`.
+// Fastify is created with Pino logging enabled. CORS is registered first
+// because all subsequent route handlers depend on it. Socket.IO is attached
+// later (after app.ready()) since it needs the underlying http.Server.
 
 const app = Fastify({ logger: true });
 
 await app.register(cors, { origin: true, methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] });
-await app.register(websocket);
 
 /**
- * Hard cap on concurrent WebSocket dashboard clients.
- * New connections beyond this limit are immediately closed with code 1013
- * ("Try Again Later"). Prevents runaway resource consumption if many
- * browser tabs are left open.
+ * Hard cap on concurrent Socket.IO dashboard clients.
+ * New connections beyond this limit are immediately disconnected.
+ * Prevents runaway resource consumption if many browser tabs are left open.
  */
 const MAX_WS_CLIENTS = 50;
 
-// ---------------------------------------------------------------------------
-// WebSocket endpoint
-// ---------------------------------------------------------------------------
-// On connect: send an `init` message with the full current state (sessions,
-// recent events, agents, worktrees) so the UI can hydrate immediately.
-// Clients are tracked in the shared `wsClients` Set used by broadcast.js.
-// Ping/pong heartbeat (below) garbage-collects half-open connections.
-
-app.register(async (fastify) => {
-  fastify.get("/ws", { websocket: true }, (socket) => {
-    if (wsClients.size >= MAX_WS_CLIENTS) {
-      socket.close(1013, "Too many connections");
-      return;
-    }
-    socket.isAlive = true;
-    wsClients.add(socket);
-    console.log(`Dashboard client connected (${wsClients.size} total)`);
-
-    socket.on("pong", () => { socket.isAlive = true; });
-
-    try {
-      socket.send(JSON.stringify({
-        type: "init",
-        sessions: getAllSessions.all(),
-        recentEvents: getRecentEventsSlim.all(),
-        agents: getRecentAgentsSlim.all(),
-        worktrees: getAllActiveWorktrees.all(),
-      }));
-    } catch (err) {
-      console.error("[ws] failed to send init:", err.message);
-    }
-
-    socket.on("error", (err) => {
-      console.error("[ws] client error:", err.message);
-      wsClients.delete(socket);
-    });
-
-    socket.on("close", () => {
-      wsClients.delete(socket);
-      console.log(`Dashboard client disconnected (${wsClients.size} total)`);
-    });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Heartbeat — detect and cull half-open WebSocket connections
-// ---------------------------------------------------------------------------
-// Every 30s: any client that didn't respond to the previous ping is terminated.
-// This is critical for long-lived dashboard tabs that lose network silently
-// (laptop sleep, Wi-Fi roaming, etc.).
-
-const heartbeatInterval = setInterval(() => {
-  for (const socket of wsClients) {
-    if (!socket.isAlive) {
-      console.warn("[ws] terminating unresponsive client (no pong received)");
-      wsClients.delete(socket);
-      socket.terminate();
-      continue;
-    }
-    socket.isAlive = false;
-    socket.ping();
-  }
-}, 30_000);
+// Socket.IO instance — created later after app.ready(), stored here for
+// the shutdown hook to reference.
+let io;
 
 /**
- * Graceful shutdown hook — cleans up heartbeat timer, git watchers,
- * and notifies all connected dashboard clients before closing sockets.
- * Code 1001 ("Going Away") tells the browser's reconnect logic that the
- * disconnect was intentional.
+ * Graceful shutdown hook — cleans up Socket.IO, diff debounce timers,
+ * and git directory watchers.
  */
 app.addHook("onClose", () => {
-  clearInterval(heartbeatInterval);
   clearDiffTimers();
   shutdownWatchers();
-  for (const socket of wsClients) {
-    socket.close(1001, "Server shutting down");
-  }
-  wsClients.clear();
+  if (io) io.close();
 });
 
 // Graceful shutdown on signals — ensures onClose hook fires, cleaning up
@@ -365,7 +295,7 @@ if (existsSync(uiBuildPath)) {
   await app.register(fastifyStatic, { root: uiBuildPath, prefix: "/", index: "200.html" });
 
   app.setNotFoundHandler(async (req, reply) => {
-    if (req.url.startsWith("/api/") || req.url.startsWith("/ws")) {
+    if (req.url.startsWith("/api/") || req.url.startsWith("/ws") || req.url.startsWith("/socket.io/")) {
       return reply.code(404).send({ error: "Not found" });
     }
     return reply.sendFile("200.html");
@@ -407,6 +337,67 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, 
 // See vpn.js for the full detection and configuration logic.
 
 await configureVpn();
+
+// ---------------------------------------------------------------------------
+// Socket.IO initialization
+// ---------------------------------------------------------------------------
+// Socket.IO attaches to the underlying http.Server created by Fastify.
+// We must call app.ready() first to finalize the route tree, then create the
+// Socket.IO server before calling app.listen() to bind the port.
+//
+// Socket.IO handles heartbeat (pingInterval/pingTimeout) and backpressure
+// natively, replacing the manual ping/pong and bufferedAmount checks that
+// the old @fastify/websocket setup required.
+
+await app.ready();
+
+io = new SocketIO(app.server, {
+  cors: { origin: true },
+  pingInterval: 30_000,
+  pingTimeout: 10_000,
+  maxHttpBufferSize: 1_000_000,
+});
+setIO(io);
+
+io.on("connection", (socket) => {
+  if (io.engine.clientsCount > MAX_WS_CLIENTS) {
+    console.warn("[ws] rejecting client — at capacity");
+    socket.disconnect(true);
+    return;
+  }
+
+  console.log(`Dashboard client connected (${io.engine.clientsCount} total)`);
+
+  // Hydrate the client with full current state
+  try {
+    socket.emit("message", {
+      type: "init",
+      sessions: getAllSessions.all(),
+      recentEvents: getRecentEventsSlim.all(),
+      agents: getRecentAgentsSlim.all(),
+      worktrees: getAllActiveWorktrees.all(),
+    });
+  } catch (err) {
+    console.error("[ws] failed to send init:", err.message);
+  }
+
+  // Room management — clients join a session room to receive scoped messages
+  socket.on("join-session", (sessionId) => {
+    // Leave any previous session rooms (socket.id is always in socket.rooms)
+    for (const room of socket.rooms) {
+      if (room !== socket.id) socket.leave(room);
+    }
+    socket.join(`session:${sessionId}`);
+  });
+
+  socket.on("leave-session", (sessionId) => {
+    socket.leave(`session:${sessionId}`);
+  });
+
+  socket.on("disconnect", () => {
+    console.log(`Dashboard client disconnected (${io.engine.clientsCount} total)`);
+  });
+});
 
 /** @type {string} Resolved listen host, defaults to localhost for security. */
 const HOST = process.env.HOST ?? "127.0.0.1";

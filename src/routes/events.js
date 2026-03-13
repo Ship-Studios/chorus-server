@@ -31,7 +31,7 @@
  *
  * @module routes/events
  */
-import { broadcast, debouncedDiffInvalidation } from "../broadcast.js";
+import { broadcast, broadcastToSession, debouncedDiffInvalidation } from "../broadcast.js";
 import {
   upsertSession,
   insertEvent,
@@ -137,7 +137,7 @@ export default async function eventRoutes(fastify) {
     if (!rawId) return reply.code(400).send({ error: "sessionId required" });
     const sessionId = lookupSessionId(rawId) || rawId;
     const toolName = body.toolName || body.tool_name;
-    broadcast({ type: "diff:pending", sessionId, toolName });
+    broadcastToSession(sessionId, { type: "diff:pending", sessionId, toolName });
     return { ok: true };
   });
 
@@ -148,7 +148,7 @@ export default async function eventRoutes(fastify) {
     const toolName = body.tool_name;
     if (!rawId) return reply.code(200).send();
     const sessionId = lookupSessionId(rawId) || rawId;
-    broadcast({ type: "diff:pending", sessionId, toolName });
+    broadcastToSession(sessionId, { type: "diff:pending", sessionId, toolName });
     return reply.code(200).send();
   });
 

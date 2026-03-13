@@ -16,7 +16,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getSession, lookupSessionId } from "../db.js";
 import { runGit, buildStatSummary, parseDiffToFiles } from "@agent-dashboard/diff-panel/server";
 import { getAnthropicFetchOptions } from "../vpn.js";
-import { broadcast } from "../broadcast.js";
+import { broadcastToSession } from "../broadcast.js";
 
 const MAX_DIFF_CHARS = 30_000;
 const MAX_SUBMODULE_DIFF_CHARS = 15_000;
@@ -181,7 +181,7 @@ export function createCommitRoutes(deps = {}) {
     buildStatSummary: buildStatSummaryImpl = buildStatSummary,
     parseDiffToFiles: parseDiffToFilesImpl = parseDiffToFiles,
     getAnthropicFetchOptions: getAnthropicFetchOptionsImpl = getAnthropicFetchOptions,
-    broadcast: broadcastImpl = broadcast,
+    broadcastToSession: broadcastToSessionImpl = broadcastToSession,
     buildPreviewDiff: buildPreviewDiffImpl = buildPreviewDiff,
   } = deps;
 
@@ -289,7 +289,7 @@ export function createCommitRoutes(deps = {}) {
           return reply.code(500).send({ error: `Git commit failed: ${e.message}` });
         }
 
-        broadcastImpl({ type: "diff:invalidated", sessionId });
+        broadcastToSessionImpl(sessionId, { type: "diff:invalidated", sessionId });
         return { ok: true, message: commitMessage, stat, filesChanged: files.length };
       }
 
@@ -404,7 +404,7 @@ export function createCommitRoutes(deps = {}) {
       // Commit parent (stages updated submodule pointers + own changes)
       // Skipped when the client requests child-only commits.
       if (skipParent) {
-        broadcastImpl({ type: "diff:invalidated", sessionId });
+        broadcastToSessionImpl(sessionId, { type: "diff:invalidated", sessionId });
         return {
           ok: true,
           message: committed.length
@@ -426,7 +426,7 @@ export function createCommitRoutes(deps = {}) {
         // (e.g. all submodule commits were skipped), report partial success
         // when at least one submodule was committed.
         if (committed.length > 0) {
-          broadcastImpl({ type: "diff:invalidated", sessionId });
+          broadcastToSessionImpl(sessionId, { type: "diff:invalidated", sessionId });
           return {
             ok: true,
             message: `Committed ${committed.length} submodule${committed.length > 1 ? "s" : ""}`,
@@ -439,7 +439,7 @@ export function createCommitRoutes(deps = {}) {
         return reply.code(500).send({ error: `Parent commit failed: ${e.message}` });
       }
 
-      broadcastImpl({ type: "diff:invalidated", sessionId });
+      broadcastToSessionImpl(sessionId, { type: "diff:invalidated", sessionId });
       return {
         ok: true,
         message: parentMsg,

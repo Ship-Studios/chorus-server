@@ -1,4 +1,4 @@
-import { broadcast } from "../broadcast.js";
+import { broadcast, broadcastToSession } from "../broadcast.js";
 import {
   upsertSession,
   updateSessionStatus,
@@ -101,7 +101,7 @@ export default async function sessionRoutes(fastify) {
       const activeAgents = getActiveSwarmAgents();
       const swarmEntry = activeAgents.find((a) => a.id === swarmAgentId);
       const parentSessionId = swarmEntry?.sessionId ?? null;
-      broadcast({
+      broadcastToSession(parentSessionId, {
         type: "swarm:session-linked",
         agentId: swarmAgentId,
         parentSessionId,
