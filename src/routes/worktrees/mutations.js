@@ -21,6 +21,8 @@ import {
 import { parseWorktreeListPorcelain } from "../../git-worktree.js";
 import { deleteBranch, detectConflicts, removeWorktree } from "../../prompt.js";
 import { runGit } from "@agent-dashboard/diff-panel/server";
+import { invalidateDiscoveredWorktrees } from "../../worktree-discovery.js";
+import { invalidateDashboardSnapshot } from "../../dashboard-snapshot.js";
 
 /**
  * Fastify plugin for worktree mutation routes.
@@ -54,6 +56,8 @@ export default async function worktreeMutationRoutes(fastify) {
       await runGit(dir, ["merge", "--no-ff", "-m", `Merge ${wt.branch_name}: ${wt.description || "agent changes"}`, wt.branch_name]);
       deleteBranch(dir, wt.branch_name);
       updateWorktreeStatus.run({ $id: wt.id, $status: "merged" });
+      invalidateDiscoveredWorktrees(dir);
+      invalidateDashboardSnapshot();
       const updated = getWorktree.get({ $id: wt.id });
       broadcastToSession(wt.session_id, { type: "worktree:updated", worktree: updated, parentSessionId: wt.session_id });
       return { ok: true, status: "merged" };
@@ -97,6 +101,10 @@ export default async function worktreeMutationRoutes(fastify) {
     }
 
     deleteWorktreeRow.run({ $id: wt.id });
+    if (session?.project_dir) {
+      invalidateDiscoveredWorktrees(session.project_dir);
+    }
+    invalidateDashboardSnapshot();
     broadcastToSession(wt.session_id, { type: "worktree:removed", worktreeId: wt.id, parentSessionId: wt.session_id });
     return { ok: true };
   });
@@ -124,6 +132,7 @@ export default async function worktreeMutationRoutes(fastify) {
 
     const conflictInfo = detectConflicts(dir, wt.base_branch, wt.branch_name);
     updateWorktreeConflicts.run({ $id: wt.id, $conflictInfo: conflictInfo });
+    invalidateDashboardSnapshot();
     const updated = getWorktree.get({ $id: wt.id });
     broadcastToSession(wt.session_id, { type: "worktree:updated", worktree: updated, parentSessionId: wt.session_id });
     return { ok: true, conflicts: !!conflictInfo, conflictInfo };

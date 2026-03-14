@@ -57,7 +57,8 @@ import { setIO } from "./socket.js";
  * Uses `bun:sqlite` in WAL mode with `$paramName` binding syntax.
  * `deduplicateSessions()` cleans up TOCTOU race duplicates from `resolveSessionId()`.
  */
-import { getAllSessions, getActiveSessions, getRecentEventsSlim, getRecentAgentsSlim, getAllActiveWorktrees, deduplicateSessions } from "./db.js";
+import { getActiveSessions, deduplicateSessions } from "./db.js";
+import { getDashboardSnapshot } from "./dashboard-snapshot.js";
 
 /**
  * Git directory watchers (chokidar).
@@ -369,17 +370,16 @@ io.on("connection", (socket) => {
   console.log(`Dashboard client connected (${io.engine.clientsCount} total)`);
 
   // Hydrate the client with full current state
-  try {
-    socket.emit("message", {
-      type: "init",
-      sessions: getAllSessions.all(),
-      recentEvents: getRecentEventsSlim.all(),
-      agents: getRecentAgentsSlim.all(),
-      worktrees: getAllActiveWorktrees.all(),
+  getDashboardSnapshot()
+    .then((snapshot) => {
+      socket.emit("message", {
+        type: "init",
+        ...snapshot,
+      });
+    })
+    .catch((err) => {
+      console.error("[ws] failed to send init:", err.message);
     });
-  } catch (err) {
-    console.error("[ws] failed to send init:", err.message);
-  }
 
   // Room management — clients join a session room to receive scoped messages
   socket.on("join-session", (sessionId) => {

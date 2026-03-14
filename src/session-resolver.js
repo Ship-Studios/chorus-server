@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { GIT } from "./git.js";
+import { basename, dirname, resolve as resolvePath } from "node:path";
+import { runGit } from "./run-git.js";
 import {
   getAlias,
   insertAlias,
@@ -7,100 +7,100 @@ import {
   findRecentSessionByDir,
   findActiveSessionByGitRoot,
   findRecentSessionByGitRoot,
+  updateSessionGitRoot,
   upsertSession,
   runInTransaction,
 } from "./db.js";
 
-/**
- * Resolves a directory to its git repository's main working tree root.
- * For worktrees, this returns the parent repo's root directory.
- * For normal repos, this returns the repo root itself.
- * Returns null if the directory is not a git repo.
- *
- * @param {string} dir - The directory to resolve
- * @returns {string|null} The main working tree root, or null
- */
-function resolveGitRoot(dir) {
-  try {
-    // Check if dir is inside a git submodule FIRST, before worktree list.
-    // `git worktree list` inside a submodule returns the gitdir path
-    // (.git/modules/...), not the working tree — and calling
-    // --show-superproject-working-tree from a gitdir returns empty.
-    // So we must check from the original working tree dir.
-    try {
-      const superproject = execFileSync(
-        GIT,
-        ["rev-parse", "--show-superproject-working-tree"],
-        { cwd: dir, encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] },
-      ).trim();
-      if (superproject) return superproject;
-    } catch {
-      // Not a submodule — continue with normal worktree resolution
-    }
+const GIT_ROOT_CACHE_MAX = 200;
+const GIT_ROOT_CACHE_TTL_MS = 5 * 60_000;
 
-    // --show-superproject-working-tree returns empty for non-submodules,
-    // so we use worktree list which always shows the main tree first.
-    const output = execFileSync(GIT, ["worktree", "list", "--porcelain"], {
-      cwd: dir,
-      encoding: "utf-8",
-      timeout: 3000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    // First "worktree <path>" line is always the main working tree
-    const match = output.match(/^worktree (.+)$/m);
-    return match ? match[1] : null;
+const gitRootCache = new Map();
+const inflightGitRoots = new Map();
+
+function getCachedGitRoot(dir) {
+  const entry = gitRootCache.get(dir);
+  if (!entry) return undefined;
+  if (Date.now() - entry.timestamp > GIT_ROOT_CACHE_TTL_MS) {
+    gitRootCache.delete(dir);
+    return undefined;
+  }
+  return entry.root;
+}
+
+function setCachedGitRoot(dir, root) {
+  if (gitRootCache.size >= GIT_ROOT_CACHE_MAX) {
+    const firstKey = gitRootCache.keys().next().value;
+    gitRootCache.delete(firstKey);
+  }
+  gitRootCache.set(dir, { root, timestamp: Date.now() });
+}
+
+async function resolveGitRoot(dir) {
+  try {
+    const superproject = (await runGit(dir, ["rev-parse", "--show-superproject-working-tree"], {
+      timeout: 3_000,
+    })).trim();
+    if (superproject) return superproject;
+  } catch {
+    // Not a submodule.
+  }
+
+  try {
+    const commonDir = resolvePath(
+      dir,
+      (await runGit(dir, ["rev-parse", "--git-common-dir"], { timeout: 3_000 })).trim(),
+    );
+    if (basename(commonDir) === ".git") {
+      return dirname(commonDir);
+    }
+  } catch {
+    // Fall through to the working tree root lookup.
+  }
+
+  try {
+    const topLevel = (await runGit(dir, ["rev-parse", "--show-toplevel"], {
+      timeout: 3_000,
+    })).trim();
+    return topLevel || null;
   } catch {
     return null;
   }
 }
 
-// Cache git root lookups to avoid repeated execSync calls.
-// Capped at 200 entries — oldest evicted when full.
-const GIT_ROOT_CACHE_MAX = 200;
-const gitRootCache = new Map();
+async function cachedGitRoot(dir) {
+  const cached = getCachedGitRoot(dir);
+  if (cached !== undefined) return cached;
 
-/**
- * Resolves a directory to its git root, with caching.
- *
- * @param {string} dir - The directory to resolve
- * @returns {string|null} The resolved git root, or null
- */
-function cachedGitRoot(dir) {
-  if (gitRootCache.has(dir)) return gitRootCache.get(dir);
-  const root = resolveGitRoot(dir);
-  if (gitRootCache.size >= GIT_ROOT_CACHE_MAX) {
-    // Evict oldest entry (first key in insertion order)
-    const firstKey = gitRootCache.keys().next().value;
-    gitRootCache.delete(firstKey);
+  if (inflightGitRoots.has(dir)) {
+    return inflightGitRoots.get(dir);
   }
-  gitRootCache.set(dir, root);
-  // Also cache the root → root mapping
-  if (root && root !== dir) gitRootCache.set(root, root);
-  return root;
+
+  const promise = resolveGitRoot(dir)
+    .then((root) => {
+      setCachedGitRoot(dir, root);
+      if (root && root !== dir) {
+        setCachedGitRoot(root, root);
+      }
+      return root;
+    })
+    .finally(() => {
+      inflightGitRoots.delete(dir);
+    });
+
+  inflightGitRoots.set(dir, promise);
+  return promise;
 }
 
-/**
- * Finds a session whose project_dir shares the same git root as the given dir.
- * Checks active sessions first, then recent ones.
- *
- * @param {string} dir - The directory to match
- * @param {string} gitRoot - The resolved git root for dir
- * @returns {{ id: string } | null}
- */
-function findSessionByGitRoot(dir, gitRoot) {
-  // Check active sessions
-  for (const row of findActiveSessionByGitRoot.all()) {
-    if (row.project_dir === dir) continue; // Already checked by exact match
-    const rowRoot = cachedGitRoot(row.project_dir);
-    if (rowRoot && rowRoot === gitRoot) return row;
-  }
-  // Check recent sessions
-  for (const row of findRecentSessionByGitRoot.all()) {
-    if (row.project_dir === dir) continue;
-    const rowRoot = cachedGitRoot(row.project_dir);
-    if (rowRoot && rowRoot === gitRoot) return row;
-  }
-  return null;
+function scheduleGitRootHydration(sessionId, projectDir) {
+  if (!projectDir || projectDir === "unknown") return;
+  cachedGitRoot(projectDir)
+    .then((gitRoot) => {
+      if (gitRoot) {
+        updateSessionGitRoot.run({ $id: sessionId, $gitRoot: gitRoot });
+      }
+    })
+    .catch(() => {});
 }
 
 /**
@@ -110,64 +110,109 @@ function findSessionByGitRoot(dir, gitRoot) {
  * 1. Check if this claude_session_id already has an alias → return it
  * 2. Check if there's an active session for the same project_dir → alias to it
  * 3. Check if there's any recent session for the same project_dir → alias to it
- * 4. Check if there's a session for the same git repo root (worktree support) → alias to it
- * 5. No match → this claude_session_id becomes its own dashboard session (new session)
+ * 4. Check if there's a session for the same git repo root (worktree/submodule support)
+ * 5. No match → this claude_session_id becomes its own dashboard session
+ *
+ * Git-root matching is async and promise-deduped so hook handlers no longer block
+ * the event loop on synchronous git subprocesses.
  *
  * @param {string} claudeSessionId - The session_id from the Claude Code hook payload
  * @param {string} projectDir - The project directory
- * @returns {string} The canonical dashboard session ID
+ * @returns {Promise<string>} The canonical dashboard session ID
  */
-export function resolveSessionId(claudeSessionId, projectDir) {
-  // Pre-compute git root OUTSIDE the transaction — cachedGitRoot may shell out
-  // to `git worktree list`, and we must not hold a SQLite write lock during I/O.
-  const needsGitRoot = projectDir && projectDir !== "unknown";
-  const gitRoot = needsGitRoot ? cachedGitRoot(projectDir) : null;
+export async function resolveSessionId(claudeSessionId, projectDir) {
+  const needsProjectDir = projectDir && projectDir !== "unknown";
 
-  // Pre-compute git root session match outside transaction too (also shells out)
-  let gitRootMatch = null;
-  if (gitRoot && gitRoot !== projectDir) {
-    gitRootMatch = findSessionByGitRoot(projectDir, gitRoot);
+  const directMatch = runInTransaction(() => {
+    const existing = getAlias.get({ $claudeSessionId: claudeSessionId });
+    if (existing) {
+      return { id: existing.dashboard_session_id, git_root: null };
+    }
+
+    if (!needsProjectDir) return null;
+
+    const active = findActiveSessionByDir.get({ $projectDir: projectDir });
+    if (active) {
+      insertAlias.run({
+        $claudeSessionId: claudeSessionId,
+        $dashboardSessionId: active.id,
+      });
+      return active;
+    }
+
+    const recent = findRecentSessionByDir.get({ $projectDir: projectDir });
+    if (recent) {
+      insertAlias.run({
+        $claudeSessionId: claudeSessionId,
+        $dashboardSessionId: recent.id,
+      });
+      return recent;
+    }
+
+    return null;
+  });
+
+  if (directMatch) {
+    if (needsProjectDir && !directMatch.git_root) {
+      scheduleGitRootHydration(directMatch.id, projectDir);
+    }
+    return directMatch.id;
   }
 
+  const gitRoot = needsProjectDir ? await cachedGitRoot(projectDir) : null;
+
   return runInTransaction(() => {
-    // 1. Already mapped?
     const existing = getAlias.get({ $claudeSessionId: claudeSessionId });
     if (existing) {
       return existing.dashboard_session_id;
     }
 
-    if (needsGitRoot) {
-      // 2. Active session for the same project dir?
+    if (needsProjectDir) {
       const active = findActiveSessionByDir.get({ $projectDir: projectDir });
       if (active) {
         insertAlias.run({
           $claudeSessionId: claudeSessionId,
           $dashboardSessionId: active.id,
         });
+        if (!active.git_root && gitRoot) {
+          updateSessionGitRoot.run({ $id: active.id, $gitRoot: gitRoot });
+        }
         return active.id;
       }
 
-      // 3. Any recent session for the same project dir?
       const recent = findRecentSessionByDir.get({ $projectDir: projectDir });
       if (recent) {
         insertAlias.run({
           $claudeSessionId: claudeSessionId,
           $dashboardSessionId: recent.id,
         });
+        if (!recent.git_root && gitRoot) {
+          updateSessionGitRoot.run({ $id: recent.id, $gitRoot: gitRoot });
+        }
         return recent.id;
       }
 
-      // 4. Check git repo root match (pre-computed outside transaction)
-      if (gitRootMatch) {
-        insertAlias.run({
-          $claudeSessionId: claudeSessionId,
-          $dashboardSessionId: gitRootMatch.id,
-        });
-        return gitRootMatch.id;
+      if (gitRoot) {
+        const activeRoot = findActiveSessionByGitRoot.get({ $gitRoot: gitRoot });
+        if (activeRoot) {
+          insertAlias.run({
+            $claudeSessionId: claudeSessionId,
+            $dashboardSessionId: activeRoot.id,
+          });
+          return activeRoot.id;
+        }
+
+        const recentRoot = findRecentSessionByGitRoot.get({ $gitRoot: gitRoot });
+        if (recentRoot) {
+          insertAlias.run({
+            $claudeSessionId: claudeSessionId,
+            $dashboardSessionId: recentRoot.id,
+          });
+          return recentRoot.id;
+        }
       }
     }
 
-    // 5. New session — alias to itself AND create the session row atomically.
     insertAlias.run({
       $claudeSessionId: claudeSessionId,
       $dashboardSessionId: claudeSessionId,
@@ -176,6 +221,7 @@ export function resolveSessionId(claudeSessionId, projectDir) {
       $id: claudeSessionId,
       $projectDir: projectDir || "unknown",
       $worktreeDir: null,
+      $gitRoot: gitRoot,
       $status: "active",
       $model: null,
       $currentClaudeSessionId: claudeSessionId,
@@ -186,8 +232,6 @@ export function resolveSessionId(claudeSessionId, projectDir) {
 
 /**
  * Resolves a Claude Code session_id to its dashboard session ID (read-only).
- * Used by event and stop handlers where we don't want to create new sessions.
- * Falls back to the input ID if no alias exists.
  *
  * @param {string} claudeSessionId - The Claude Code session ID to look up
  * @returns {string} The canonical dashboard session ID

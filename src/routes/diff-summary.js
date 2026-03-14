@@ -28,7 +28,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { getSession, lookupSessionId } from "../db.js";
-import { runGit, buildStatSummary, parseDiffToFiles, summarizeDiff } from "@agent-dashboard/diff-panel/server";
+import { runGit, buildStatFromShortstat, summarizeDiff } from "@agent-dashboard/diff-panel/server";
 import { getAnthropicFetchOptions } from "../vpn.js";
 
 // ── In-memory cache keyed on SHA-256 of diff content ────────────────────────
@@ -137,9 +137,8 @@ export default async function diffSummaryRoutes(fastify) {
       return { summary: cached.summary, model: cached.model, cached: true };
     }
 
-    // Build stat context
-    const files = parseDiffToFiles(diff);
-    const stat = buildStatSummary(files);
+    // Build stat context via --shortstat (cheaper than full diff parse)
+    const stat = await buildStatFromShortstat(dir);
 
     try {
       const result = await summarizeDiff({ diff, stat, client: anthropic });

@@ -12,7 +12,7 @@ const diffTimers = new Map();
  * @param {string} sessionId - The ID of the session to invalidate.
  */
 export function debouncedDiffInvalidation(sessionId) {
-  if (diffTimers.has(sessionId)) return; // already scheduled
+  if (diffTimers.has(sessionId)) clearTimeout(diffTimers.get(sessionId));
   diffTimers.set(
     sessionId,
     setTimeout(() => {

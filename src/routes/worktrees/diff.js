@@ -17,6 +17,11 @@ import { parseDiffToFiles, buildStatSummary, runGit } from "@agent-dashboard/dif
  * @param {import("fastify").FastifyInstance} fastify - Fastify instance
  */
 export default async function worktreeDiffRoutes(fastify) {
+  async function listChangedPaths(dir, range) {
+    const output = await runGit(dir, ["diff", "--name-only", range]);
+    return output.trim().split("\n").map((line) => line.trim()).filter(Boolean);
+  }
+
   /**
    * GET /api/worktrees/:id/diff
    * 
@@ -42,18 +47,28 @@ export default async function worktreeDiffRoutes(fastify) {
       const MAX_FILES_DEFAULT = 200;
       const maxFiles = Math.min(Number(req.query.maxFiles) || MAX_FILES_DEFAULT, 500);
       const range = `${wt.base_branch}...${wt.branch_name}`;
-      const diff = await runGit(dir, ["diff", "--no-color", "--unified=5", "--submodule=diff", range]);
-      const allFiles = parseDiffToFiles(diff);
-      const truncated = allFiles.length > maxFiles;
-      const files = truncated ? allFiles.slice(0, maxFiles) : allFiles;
+      let totalFiles = wt.files_changed || 0;
+      let diffArgs = ["diff", "--no-color", "--unified=5", "--submodule=diff", range];
+
+      if (totalFiles > maxFiles) {
+        const changedPaths = await listChangedPaths(dir, range);
+        totalFiles = changedPaths.length || totalFiles;
+        if (changedPaths.length > maxFiles) {
+          diffArgs = [...diffArgs, "--", ...changedPaths.slice(0, maxFiles)];
+        }
+      }
+
+      const diff = await runGit(dir, diffArgs);
+      const files = parseDiffToFiles(diff);
+      const truncated = totalFiles > maxFiles;
       return {
         worktreeId: wt.id,
         branchName: wt.branch_name,
         baseBranch: wt.base_branch,
-        stat: buildStatSummary(allFiles),
+        stat: wt.diff_stat || buildStatSummary(files),
         diff: "",
         files,
-        totalFiles: allFiles.length,
+        totalFiles: totalFiles || files.length,
         truncated,
       };
     } catch (err) {

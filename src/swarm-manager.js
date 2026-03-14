@@ -1,21 +1,30 @@
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { writeFile, unlink } from "node:fs/promises";
-import { GIT } from "./git.js";
 import { createStreamParser } from "./stream-parser.js";
 import {
+  autoCommitWorktree,
   createWorktree,
   removeWorktree,
-  deleteBranch,
-  getBranchDiffStats,
-  detectConflicts,
+  deleteBranchAsync,
+  getBranchDiffStatsAsync,
+  detectConflictsAsync,
 } from "./git-worktree.js";
 
 /** @type {Map<string, { id: string, controller: AbortController, proc: import("child_process").ChildProcess, description: string, status: string, startedAt: number, sessionId: string, worktreePath?: string, branchName?: string, baseBranch?: string, baseCwd: string }>} */
 const activeSwarmAgents = new Map();
 
 const MAX_SWARM_AGENTS = parseInt(process.env.MAX_SWARM_AGENTS || "10", 10);
+
+async function cleanupSwarmWorktree(baseCwd, worktreePath, branchName) {
+  if (worktreePath) {
+    await removeWorktree(baseCwd, worktreePath);
+  }
+  if (branchName) {
+    await deleteBranchAsync(baseCwd, branchName);
+  }
+}
 
 /**
  * Spawn a new independent Claude Code agent as part of a swarm.
@@ -49,7 +58,7 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
   let baseBranch = null;
   if (useWorktree) {
     try {
-      const wt = createWorktree(cwd, id, description);
+      const wt = await createWorktree(cwd, id, description);
       worktreePath = wt.worktreePath;
       branchName = wt.branchName;
       baseBranch = wt.baseBranch;
@@ -158,41 +167,17 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
       // The agent edits files in the working tree but doesn't commit — without this,
       // removeWorktree discards all changes and the branch stays at the base commit.
       if (worktreePath) {
-        try {
-          const statusOut = execFileSync(GIT, ["status", "--porcelain"], {
-            cwd: worktreePath,
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
-            timeout: 5000,
-          }).trim();
-          if (!statusOut) {
-            console.log(`[swarm:${id}] No changes to commit in worktree`);
-          } else {
-            console.log(`[swarm:${id}] Staging ${statusOut.split("\n").length} changed file(s)`);
-          }
-          execFileSync(GIT, ["add", "-A"], { cwd: worktreePath, stdio: "pipe", timeout: 10000 });
-          execFileSync(GIT, ["commit", "-m", `agent: ${description || id}`], {
-            cwd: worktreePath,
-            stdio: "pipe",
-            timeout: 10000,
-            env: { ...process.env, GIT_AUTHOR_NAME: "Agent", GIT_COMMITTER_NAME: "Agent", GIT_AUTHOR_EMAIL: "agent@dashboard", GIT_COMMITTER_EMAIL: "agent@dashboard" },
-          });
-          console.log(`[swarm:${id}] Committed agent changes to branch ${branchName}`);
-        } catch (err) {
-          // "nothing to commit" exits non-zero — that's fine
-          const msg = err.stderr?.toString?.().trim() || err.message;
-          if (!msg.includes("nothing to commit") && !msg.includes("nothing added to commit")) {
-            console.warn(`[swarm:${id}] Auto-commit warning: ${msg}`);
-          }
-        }
+        await autoCommitWorktree(worktreePath, description, id, branchName);
         await removeWorktree(cwd, worktreePath);
       }
 
       // Gather branch stats for the worktree record (if applicable)
       let worktreeStats = null;
       if (branchName && baseBranch) {
-        const stats = getBranchDiffStats(cwd, baseBranch, branchName);
-        const conflictInfo = detectConflicts(cwd, baseBranch, branchName);
+        const [stats, conflictInfo] = await Promise.all([
+          getBranchDiffStatsAsync(cwd, baseBranch, branchName),
+          detectConflictsAsync(cwd, baseBranch, branchName),
+        ]);
         worktreeStats = { ...stats, conflictInfo, branchName, baseBranch };
       }
 
@@ -215,13 +200,7 @@ export async function spawnSwarmAgent({ prompt, cwd, description, permissionMode
     if (imagePath) {
       unlink(imagePath).catch(() => {});
     }
-    if (worktreePath) {
-      removeWorktree(cwd, worktreePath).catch(() => {});
-    }
-    // On error, also clean up the branch since no useful work was done
-    if (branchName) {
-      deleteBranch(cwd, branchName);
-    }
+    cleanupSwarmWorktree(cwd, worktreePath, branchName).catch(() => {});
     onEvent({ type: "swarm:done", agentId: id, exitCode: null, error: err.message, description });
   });
 
@@ -253,12 +232,7 @@ export function cancelSwarmAgent(agentId) {
     }
     activeSwarmAgents.delete(agentId);
     // Clean up worktree and branch (cancelled = no useful work)
-    if (entry.worktreePath) {
-      removeWorktree(entry.baseCwd, entry.worktreePath).catch(() => {});
-    }
-    if (entry.branchName) {
-      deleteBranch(entry.baseCwd, entry.branchName);
-    }
+    cleanupSwarmWorktree(entry.baseCwd, entry.worktreePath, entry.branchName).catch(() => {});
     return { cancelled: true, sessionId };
   }
   return { cancelled: false, sessionId: null };

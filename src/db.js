@@ -24,6 +24,7 @@ db.exec(`
     id TEXT PRIMARY KEY,
     project_dir TEXT NOT NULL,
     worktree_dir TEXT,
+    git_root TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     model TEXT,
     current_claude_session_id TEXT,
@@ -122,6 +123,22 @@ db.exec(`
   );
 `);
 
+const sessionColumns = db.query("PRAGMA table_info(sessions)").all();
+if (!sessionColumns.some((column) => column.name === "git_root")) {
+  db.exec("ALTER TABLE sessions ADD COLUMN git_root TEXT");
+}
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_sessions_status_started_at ON sessions(status, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_sessions_project_status_last_seen ON sessions(project_dir, status, last_seen_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_sessions_project_last_seen ON sessions(project_dir, last_seen_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_sessions_git_root_status_last_seen ON sessions(git_root, status, last_seen_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_sessions_git_root_last_seen ON sessions(git_root, last_seen_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_agents_created ON agents(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_worktrees_status_created ON worktrees(status, created_at DESC);
+`);
+
 /**
  * Insert or update a session row. Update semantics:
  * - `model`: keeps existing value if the new value is NULL (hooks may not always send it)
@@ -131,8 +148,8 @@ db.exec(`
  *   subprocess is active to avoid clobbering the real session ID with an ephemeral one
  */
 export const upsertSession = db.prepare(`
-  INSERT INTO sessions (id, project_dir, worktree_dir, status, model, current_claude_session_id)
-  VALUES ($id, $projectDir, $worktreeDir, $status, $model, $currentClaudeSessionId)
+  INSERT INTO sessions (id, project_dir, worktree_dir, git_root, status, model, current_claude_session_id)
+  VALUES ($id, $projectDir, $worktreeDir, $gitRoot, $status, $model, $currentClaudeSessionId)
   ON CONFLICT(id) DO UPDATE SET
     status = $status,
     model = COALESCE($model, sessions.model),
@@ -145,8 +162,16 @@ export const upsertSession = db.prepare(`
       WHEN $worktreeDir = '__clear__' THEN NULL
       ELSE COALESCE($worktreeDir, sessions.worktree_dir)
     END,
+    git_root = COALESCE($gitRoot, sessions.git_root),
     current_claude_session_id = COALESCE($currentClaudeSessionId, sessions.current_claude_session_id),
     last_seen_at = datetime('now')
+`);
+
+/** Backfills a session's git_root once it has been resolved asynchronously. */
+export const updateSessionGitRoot = db.prepare(`
+  UPDATE sessions
+  SET git_root = COALESCE($gitRoot, git_root)
+  WHERE id = $id
 `);
 
 /** Updates the status of a session and its last_seen_at timestamp. */
@@ -305,7 +330,7 @@ export const insertAlias = db.prepare(`
 
 /** Finds the most recently active session ID for a given project directory. */
 export const findActiveSessionByDir = db.prepare(`
-  SELECT id FROM sessions
+  SELECT id, git_root FROM sessions
   WHERE project_dir = $projectDir AND status = 'active'
   ORDER BY last_seen_at DESC
   LIMIT 1
@@ -313,26 +338,26 @@ export const findActiveSessionByDir = db.prepare(`
 
 /** Finds a session ID for a project directory that was seen in the last 30 minutes. */
 export const findRecentSessionByDir = db.prepare(`
-  SELECT id FROM sessions
+  SELECT id, git_root FROM sessions
   WHERE project_dir = $projectDir AND last_seen_at >= datetime('now', '-30 minutes')
   ORDER BY last_seen_at DESC
   LIMIT 1
 `);
 
-/** Retrieves up to 50 active sessions for git root resolution. */
+/** Finds an active session that shares the same git root. */
 export const findActiveSessionByGitRoot = db.prepare(`
-  SELECT id, project_dir FROM sessions
-  WHERE status = 'active'
+  SELECT id, git_root FROM sessions
+  WHERE git_root = $gitRoot AND status = 'active'
   ORDER BY last_seen_at DESC
-  LIMIT 50
+  LIMIT 1
 `);
 
-/** Retrieves up to 50 sessions seen in the last 30 minutes for git root resolution. */
+/** Finds a recent session that shares the same git root. */
 export const findRecentSessionByGitRoot = db.prepare(`
-  SELECT id, project_dir FROM sessions
-  WHERE last_seen_at >= datetime('now', '-30 minutes')
+  SELECT id, git_root FROM sessions
+  WHERE git_root = $gitRoot AND last_seen_at >= datetime('now', '-30 minutes')
   ORDER BY last_seen_at DESC
-  LIMIT 50
+  LIMIT 1
 `);
 
 // Re-export resolveSessionId and lookupSessionId from session-resolver.js
@@ -459,12 +484,16 @@ export function deduplicateSessions() {
     const remove = idList.slice(1);
     db.transaction(() => {
       for (const id of remove) {
+        const dup = getSession.get({ $id: id });
         db.prepare(`UPDATE session_aliases SET dashboard_session_id = $keep WHERE dashboard_session_id = $id`)
           .run({ $keep: keep, $id: id });
         db.prepare(`UPDATE events SET session_id = $keep WHERE session_id = $id`)
           .run({ $keep: keep, $id: id });
         db.prepare(`UPDATE agents SET session_id = $keep WHERE session_id = $id`)
           .run({ $keep: keep, $id: id });
+        if (dup?.git_root) {
+          updateSessionGitRoot.run({ $id: keep, $gitRoot: dup.git_root });
+        }
         db.prepare(`DELETE FROM sessions WHERE id = $id`).run({ $id: id });
       }
     })();

@@ -721,6 +721,7 @@ function resolveRelative(fromDir, specifier) {
 // ── In-memory cache (projectDir → { result, timestamp }) ────────────────────
 
 const cache = new Map();
+const inflight = new Map();
 const CACHE_TTL = 30_000; // 30 seconds
 
 /**
@@ -736,7 +737,19 @@ export async function getArchitecture(projectDir) {
     return cached.result;
   }
 
-  const result = await scanArchitecture(projectDir);
-  cache.set(projectDir, { result, timestamp: now });
-  return result;
+  if (inflight.has(projectDir)) {
+    return inflight.get(projectDir);
+  }
+
+  const promise = scanArchitecture(projectDir)
+    .then((result) => {
+      cache.set(projectDir, { result, timestamp: Date.now() });
+      return result;
+    })
+    .finally(() => {
+      inflight.delete(projectDir);
+    });
+
+  inflight.set(projectDir, promise);
+  return promise;
 }

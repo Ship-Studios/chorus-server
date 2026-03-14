@@ -46,6 +46,31 @@ import {
   getSession,
 } from "../db.js";
 import { isPromptActive } from "../prompt.js";
+import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
+
+const MAX_PAYLOAD_STRING_CHARS = 50_000;
+const TRUNCATED_SUFFIX = "…[truncated]";
+
+function truncateString(value) {
+  if (typeof value !== "string" || value.length <= MAX_PAYLOAD_STRING_CHARS) {
+    return value;
+  }
+  return value.slice(0, MAX_PAYLOAD_STRING_CHARS) + TRUNCATED_SUFFIX;
+}
+
+function stringifyPayload(value) {
+  const seen = new WeakSet();
+  return JSON.stringify(value, (_key, current) => {
+    if (typeof current === "string") {
+      return truncateString(current);
+    }
+    if (current && typeof current === "object") {
+      if (seen.has(current)) return "[circular]";
+      seen.add(current);
+    }
+    return current;
+  });
+}
 
 /**
  * Fastify plugin for event and hook routes.
@@ -62,13 +87,14 @@ export default async function eventRoutes(fastify) {
       return reply.code(400).send({ error: "sessionId is required" });
     }
 
-    const sessionId = resolveSessionId(claudeSessionId, body.projectDir || "unknown");
+    const sessionId = await resolveSessionId(claudeSessionId, body.projectDir || "unknown");
 
     // Auto-create session if it doesn't exist yet (race: PostToolUse before SessionStart)
     upsertSession.run({
       $id: sessionId,
       $projectDir: body.projectDir || "unknown",
       $worktreeDir: null,
+      $gitRoot: null,
       $status: "active",
       $model: null,
       $currentClaudeSessionId: null,
@@ -80,7 +106,7 @@ export default async function eventRoutes(fastify) {
       $toolName: body.toolName ?? null,
       $filePath: body.filePath ?? null,
       $summary: body.summary ?? null,
-      $payload: body.payload ? JSON.stringify(body.payload) : null,
+      $payload: body.payload ? stringifyPayload(body.payload) : null,
     });
     const event = {
       id: eventId,
@@ -131,6 +157,7 @@ export default async function eventRoutes(fastify) {
       });
     }
 
+    invalidateDashboardSnapshot();
     return { ok: true };
   });
 
@@ -165,7 +192,7 @@ export default async function eventRoutes(fastify) {
     if (!rawId) return reply.code(200).send();
 
     const projectDir = body.cwd || "unknown";
-    const sessionId = resolveSessionId(rawId, projectDir);
+    const sessionId = await resolveSessionId(rawId, projectDir);
     const toolName = body.tool_name;
     const toolInput = body.tool_input ?? {};
     const toolResponse = body.tool_response ?? {};
@@ -175,6 +202,7 @@ export default async function eventRoutes(fastify) {
       $id: sessionId,
       $projectDir: projectDir,
       $worktreeDir: null,
+      $gitRoot: null,
       $status: "active",
       $model: null,
       $currentClaudeSessionId: null,
@@ -192,25 +220,13 @@ export default async function eventRoutes(fastify) {
       summary = toolName || "unknown";
     }
 
-    // Truncate large string values in payload to ~50KB
-    const truncate = (obj) => {
-      if (typeof obj === "string") return obj.length > 50000 ? obj.slice(0, 50000) + "…[truncated]" : obj;
-      if (Array.isArray(obj)) return obj.map(truncate);
-      if (obj && typeof obj === "object") {
-        const out = {};
-        for (const [k, v] of Object.entries(obj)) out[k] = truncate(v);
-        return out;
-      }
-      return obj;
-    };
-
     const { id: eventId } = insertEvent.get({
       $sessionId: sessionId,
       $type: "tool_use",
       $toolName: toolName ?? null,
       $filePath: toolInput.file_path || toolInput.path || null,
       $summary: summary,
-      $payload: JSON.stringify({ input: truncate(toolInput), response: truncate(toolResponse) }),
+      $payload: stringifyPayload({ input: toolInput, response: toolResponse }),
     });
 
     const event = {
@@ -242,6 +258,7 @@ export default async function eventRoutes(fastify) {
       });
     }
 
+    invalidateDashboardSnapshot();
     return reply.code(200).send();
   });
 
@@ -252,7 +269,7 @@ export default async function eventRoutes(fastify) {
     if (!rawId) return reply.code(200).send();
 
     const projectDir = body.cwd || "unknown";
-    const sessionId = resolveSessionId(rawId, projectDir);
+    const sessionId = await resolveSessionId(rawId, projectDir);
     const toolName = body.tool_name;
     const toolInput = body.tool_input ?? {};
     const error = body.error || "Tool failed";
@@ -263,9 +280,10 @@ export default async function eventRoutes(fastify) {
       $toolName: toolName ?? null,
       $filePath: toolInput.file_path || toolInput.path || null,
       $summary: `${toolName} failed: ${error.slice(0, 120)}`,
-      $payload: JSON.stringify({ error, input: toolInput }),
+      $payload: stringifyPayload({ error, input: toolInput }),
     });
 
+    invalidateDashboardSnapshot();
     broadcast({
       type: "event:new",
       event: {
@@ -289,6 +307,7 @@ export default async function eventRoutes(fastify) {
     try {
       updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
     } catch { /* session may not exist */ }
+    invalidateDashboardSnapshot();
     const session = getSession.get({ $id: sessionId });
     if (session) broadcast({ type: "session:updated", session });
     return reply.code(200).send();

@@ -1,6 +1,126 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { join } from "node:path";
 import { GIT } from "./git.js";
+
+const DEFAULT_GIT_TIMEOUT = 15000;
+const MAX_GIT_BUFFER = 10 * 1024 * 1024;
+
+function createGitError(args, code, stdout, stderr, message) {
+  const err = new Error(message || stderr.trim() || stdout.trim() || `git ${args[0]} exited with code ${code}`);
+  err.code = code;
+  err.stdout = stdout;
+  err.stderr = stderr;
+  return err;
+}
+
+function getGitErrorMessage(err) {
+  if (!err) return "Unknown git error";
+  if (typeof err.stderr === "string" && err.stderr.trim()) return err.stderr.trim();
+  if (typeof err.stdout === "string" && err.stdout.trim()) return err.stdout.trim();
+  return err.message || String(err);
+}
+
+function parseNumstat(numstatOutput) {
+  let filesChanged = 0;
+  let insertions = 0;
+  let deletions = 0;
+
+  for (const line of numstatOutput.split("\n")) {
+    if (!line.trim()) continue;
+    const [add, del] = line.split("\t");
+    filesChanged++;
+    insertions += parseInt(add, 10) || 0;
+    deletions += parseInt(del, 10) || 0;
+  }
+
+  return { filesChanged, insertions, deletions };
+}
+
+function runGitAsync(cwd, args, { timeout = DEFAULT_GIT_TIMEOUT, env } = {}) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(GIT, args, {
+      cwd,
+      env: env ? { ...process.env, ...env } : process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutLen = 0;
+    let stderrLen = 0;
+    let settled = false;
+
+    const finishResolve = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    };
+
+    const timer = setTimeout(() => {
+      const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf-8");
+      proc.kill("SIGTERM");
+      finishReject(createGitError(args, null, stdout, stderr, `git ${args[0]} timed out after ${timeout}ms`));
+    }, timeout);
+
+    proc.stdout.on("data", (chunk) => {
+      stdoutLen += chunk.length;
+      if (stdoutLen > MAX_GIT_BUFFER) {
+        const stdout = Buffer.concat([...stdoutChunks, chunk]).toString("utf-8");
+        const stderr = Buffer.concat(stderrChunks).toString("utf-8");
+        proc.kill("SIGTERM");
+        finishReject(createGitError(args, null, stdout, stderr, `git ${args[0]} output exceeded ${MAX_GIT_BUFFER} bytes`));
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+
+    proc.stderr.on("data", (chunk) => {
+      stderrLen += chunk.length;
+      if (stderrLen > MAX_GIT_BUFFER) {
+        const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+        const stderr = Buffer.concat([...stderrChunks, chunk]).toString("utf-8");
+        proc.kill("SIGTERM");
+        finishReject(createGitError(args, null, stdout, stderr, `git ${args[0]} stderr exceeded ${MAX_GIT_BUFFER} bytes`));
+        return;
+      }
+      stderrChunks.push(chunk);
+    });
+
+    proc.on("error", (err) => {
+      finishReject(new Error(`Failed to spawn git: ${err.message}`));
+    });
+
+    proc.on("close", (code) => {
+      if (settled) return;
+      const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf-8");
+      if (code === 0) {
+        finishResolve({ stdout, stderr });
+        return;
+      }
+      finishReject(createGitError(args, code, stdout, stderr));
+    });
+  });
+}
+
+async function getCurrentBranchAsync(repoDir) {
+  try {
+    const { stdout } = await runGitAsync(repoDir, ["rev-parse", "--abbrev-ref", "HEAD"], {
+      timeout: 5000,
+    });
+    return stdout.trim();
+  } catch {
+    return "main";
+  }
+}
 
 /**
  * Slugify a description for use as a git branch name.
@@ -42,20 +162,18 @@ export function getCurrentBranch(repoDir) {
  * @param {string} repoDir - The git repository root.
  * @param {string} id - Unique identifier for the worktree.
  * @param {string} description - Human-readable description (used to generate branch name).
- * @returns {{ worktreePath: string, branchName: string, baseBranch: string }}
+ * @returns {Promise<{ worktreePath: string, branchName: string, baseBranch: string }>}
  */
-export function createWorktree(repoDir, id, description) {
+export async function createWorktree(repoDir, id, description) {
   // Always resolve to a stable base branch — never use an agent/ branch as base,
   // since the current HEAD might be a transient agent worktree branch.
-  const currentBranch = getCurrentBranch(repoDir);
+  const currentBranch = await getCurrentBranchAsync(repoDir);
   const baseBranch = currentBranch.startsWith("agent/") ? "main" : currentBranch;
   const slug = slugify(description || id);
   const branchName = `agent/${slug}-${id.slice(0, 6)}`;
   const worktreePath = join(repoDir, "..", `.swarm-worktree-${id}`);
 
-  execFileSync(GIT, ["worktree", "add", "-b", branchName, worktreePath, baseBranch], {
-    cwd: repoDir,
-    stdio: "pipe",
+  await runGitAsync(repoDir, ["worktree", "add", "-b", branchName, worktreePath, baseBranch], {
     timeout: 15000,
   });
 
@@ -80,14 +198,12 @@ export async function removeWorktree(repoDir, worktreePath) {
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      execFileSync(GIT, ["worktree", "remove", "--force", worktreePath], {
-        cwd: repoDir,
-        stdio: "pipe",
+      await runGitAsync(repoDir, ["worktree", "remove", "--force", worktreePath], {
         timeout: 15000,
       });
       return; // success
     } catch (err) {
-      const msg = err.stderr?.toString?.() || err.message;
+      const msg = getGitErrorMessage(err);
       if (attempt < maxAttempts) {
         // Hook scripts run curl in background (&) which may still hold the worktree
         // CWD open briefly after the claude process exits. Retry after a short pause.
@@ -118,6 +234,22 @@ export function deleteBranch(repoDir, branchName) {
 }
 
 /**
+ * Delete a git branch asynchronously.
+ * @param {string} repoDir
+ * @param {string} branchName
+ * @returns {Promise<void>}
+ */
+export async function deleteBranchAsync(repoDir, branchName) {
+  try {
+    await runGitAsync(repoDir, ["branch", "-D", branchName], {
+      timeout: 5000,
+    });
+  } catch (err) {
+    console.error(`[worktree] Failed to delete branch ${branchName}: ${getGitErrorMessage(err)}`);
+  }
+}
+
+/**
  * Get diff stats between two branches.
  * @param {string} repoDir
  * @param {string} baseBranch
@@ -140,18 +272,35 @@ export function getBranchDiffStats(repoDir, baseBranch, headBranch) {
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
 
-    let filesChanged = 0, insertions = 0, deletions = 0;
-    for (const line of numstat.split("\n")) {
-      if (!line.trim()) continue;
-      const [add, del] = line.split("\t");
-      filesChanged++;
-      insertions += parseInt(add, 10) || 0;
-      deletions += parseInt(del, 10) || 0;
-    }
-
-    return { filesChanged, insertions, deletions, diffStat: stat };
+    return { ...parseNumstat(numstat), diffStat: stat };
   } catch (err) {
     const msg = err.stderr?.toString?.().trim() || err.message || String(err);
+    console.error(`[worktree] getBranchDiffStats failed for ${baseBranch}...${headBranch} in ${repoDir}: ${msg}`);
+    return { filesChanged: 0, insertions: 0, deletions: 0, diffStat: "" };
+  }
+}
+
+/**
+ * Get diff stats between two branches asynchronously.
+ * @param {string} repoDir
+ * @param {string} baseBranch
+ * @param {string} headBranch
+ * @returns {Promise<{ filesChanged: number, insertions: number, deletions: number, diffStat: string }>}
+ */
+export async function getBranchDiffStatsAsync(repoDir, baseBranch, headBranch) {
+  try {
+    const [{ stdout: stat }, { stdout: numstat }] = await Promise.all([
+      runGitAsync(repoDir, ["diff", "--stat", "--no-color", `${baseBranch}...${headBranch}`], {
+        timeout: 10000,
+      }),
+      runGitAsync(repoDir, ["diff", "--numstat", `${baseBranch}...${headBranch}`], {
+        timeout: 10000,
+      }),
+    ]);
+
+    return { ...parseNumstat(numstat.trim()), diffStat: stat.trim() };
+  } catch (err) {
+    const msg = getGitErrorMessage(err);
     console.error(`[worktree] getBranchDiffStats failed for ${baseBranch}...${headBranch} in ${repoDir}: ${msg}`);
     return { filesChanged: 0, insertions: 0, deletions: 0, diffStat: "" };
   }
@@ -215,5 +364,73 @@ export function detectConflicts(repoDir, baseBranch, headBranch) {
       }
     }
     return conflicts.length > 0 ? conflicts.join("\n") : "Merge conflicts detected";
+  }
+}
+
+/**
+ * Check for merge conflicts between a branch and its base using git merge-tree.
+ * Returns a conflict description string, or null if clean.
+ * @param {string} repoDir
+ * @param {string} baseBranch
+ * @param {string} headBranch
+ * @returns {Promise<string | null>}
+ */
+export async function detectConflictsAsync(repoDir, baseBranch, headBranch) {
+  try {
+    await runGitAsync(repoDir, ["merge-tree", "--write-tree", baseBranch, headBranch], {
+      timeout: 15000,
+    });
+    return null;
+  } catch (err) {
+    const output = typeof err.stdout === "string" && err.stdout ? err.stdout : err.message || String(err);
+    const conflicts = [];
+    for (const line of output.split("\n")) {
+      if (line.startsWith("CONFLICT")) {
+        conflicts.push(line);
+      }
+    }
+    return conflicts.length > 0 ? conflicts.join("\n") : "Merge conflicts detected";
+  }
+}
+
+/**
+ * Stage and commit any worktree changes using the dashboard's synthetic git identity.
+ * Non-committable states such as "nothing to commit" are treated as success.
+ * @param {string} worktreePath
+ * @param {string} description
+ * @param {string} id
+ * @param {string | null} branchName
+ * @returns {Promise<void>}
+ */
+export async function autoCommitWorktree(worktreePath, description, id, branchName) {
+  try {
+    const { stdout } = await runGitAsync(worktreePath, ["status", "--porcelain"], {
+      timeout: 5000,
+    });
+    const statusOut = stdout.trim();
+    if (!statusOut) {
+      console.log(`[swarm:${id}] No changes to commit in worktree`);
+    } else {
+      console.log(`[swarm:${id}] Staging ${statusOut.split("\n").length} changed file(s)`);
+    }
+
+    await runGitAsync(worktreePath, ["add", "-A"], {
+      timeout: 10000,
+    });
+    await runGitAsync(worktreePath, ["commit", "-m", `agent: ${description || id}`], {
+      timeout: 10000,
+      env: {
+        GIT_AUTHOR_NAME: "Agent",
+        GIT_COMMITTER_NAME: "Agent",
+        GIT_AUTHOR_EMAIL: "agent@dashboard",
+        GIT_COMMITTER_EMAIL: "agent@dashboard",
+      },
+    });
+    console.log(`[swarm:${id}] Committed agent changes to branch ${branchName}`);
+  } catch (err) {
+    const msg = getGitErrorMessage(err);
+    if (!msg.includes("nothing to commit") && !msg.includes("nothing added to commit")) {
+      console.warn(`[swarm:${id}] Auto-commit warning: ${msg}`);
+    }
   }
 }

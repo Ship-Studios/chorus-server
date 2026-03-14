@@ -11,6 +11,7 @@ import {
 } from "../db.js";
 import { isPromptActive, cancelPrompt, getActiveSwarmAgents, hasActiveSwarmAgents, cancelSwarmAgent } from "../prompt.js";
 import { startWatching, stopWatching } from "../git-watcher.js";
+import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
 
 /**
  * Fastify plugin for session lifecycle routes.
@@ -43,7 +44,7 @@ export default async function sessionRoutes(fastify) {
         $dashboardSessionId: claudeSessionId,
       });
     } else {
-      sessionId = resolveSessionId(claudeSessionId, projectDir);
+      sessionId = await resolveSessionId(claudeSessionId, projectDir);
     }
 
     const isAliasedToExisting = sessionId !== claudeSessionId;
@@ -70,14 +71,16 @@ export default async function sessionRoutes(fastify) {
       $projectDir: isWorktree ? existingSession.project_dir : projectDir,
       $worktreeDir: isWorktree
         ? projectDir
-        : shouldClearWorktree
-          ? "__clear__"
-          : (body.worktreeDir ?? null),
+          : shouldClearWorktree
+            ? "__clear__"
+            : (body.worktreeDir ?? null),
+      $gitRoot: null,
       $status: "active",
       $model: body.model || null,
       $currentClaudeSessionId: hasActivePrompt ? null : claudeSessionId,
     });
 
+    invalidateDashboardSnapshot();
     broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
 
     // Start watching .git for changes (deduplicates by directory)
@@ -123,6 +126,7 @@ export default async function sessionRoutes(fastify) {
         console.log(`Session ${sessionId} not found for stop, ignoring`);
       }
 
+      invalidateDashboardSnapshot();
       broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
       return { ok: true };
     },
@@ -164,8 +168,8 @@ export default async function sessionRoutes(fastify) {
       return reply.code(500).send({ error: "Failed to delete session" });
     }
 
+    invalidateDashboardSnapshot();
     broadcast({ type: "session:deleted", sessionId });
     return { ok: true };
   });
 }
-

@@ -83,6 +83,10 @@ function buildSubmoduleCommitPrompt(scopes) {
  * @returns {Promise<Array<{path: string, absPath: string}>>} A list of dirty submodules.
  */
 async function getDirtySubmodules(dir, runGitFn, existsSyncFn) {
+  if (!existsSyncFn(join(dir, ".gitmodules"))) {
+    return [];
+  }
+
   let gitmodulesContent;
   try {
     gitmodulesContent = await runGitFn(dir, ["config", "--file", ".gitmodules", "--get-regexp", "^submodule\\..*\\.path$"]);

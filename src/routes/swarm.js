@@ -28,6 +28,8 @@ import {
   getWorktree,
 } from "../db.js";
 import { spawnSwarmAgent, cancelSwarmAgent, getActiveSwarmAgents } from "../prompt.js";
+import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
+import { invalidateDiscoveredWorktrees } from "../worktree-discovery.js";
 
 /** Body size limit for spawn requests — 15 MB to accommodate base64-encoded images. */
 const SPAWN_BODY_LIMIT = 15 * 1024 * 1024;
@@ -109,6 +111,8 @@ export default async function swarmRoutes(fastify) {
               updateWorktreeConflicts.run({ $id: worktreeDbId, $conflictInfo: wt.conflictInfo });
             }
 
+            invalidateDiscoveredWorktrees(session.project_dir);
+            invalidateDashboardSnapshot();
             const worktreeRow = getWorktree.get({ $id: worktreeDbId });
             broadcastToSession(sessionId, { type: "worktree:ready", worktree: worktreeRow, parentSessionId: sessionId });
 
@@ -134,6 +138,9 @@ export default async function swarmRoutes(fastify) {
       throw err;
     }
 
+    if (useWorktree) {
+      invalidateDiscoveredWorktrees(session.project_dir);
+    }
     broadcastToSession(sessionId, { type: "swarm:spawned", agentId, parentSessionId: sessionId, description: agentDescription, startedAt: Date.now(), worktree: !!useWorktree });
     return { ok: true, agentId };
   });

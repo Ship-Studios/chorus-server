@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { slugify, createWorktree, removeWorktree } from "./git-worktree.js";
+import {
+  autoCommitWorktree,
+  createWorktree,
+  detectConflictsAsync,
+  getBranchDiffStatsAsync,
+  removeWorktree,
+  slugify,
+} from "./git-worktree.js";
 import { GIT } from "./git.js";
 
 const TEMP_REPO = join(import.meta.dir, "..", ".test-git-worktree-repo");
@@ -82,7 +89,7 @@ describe("createWorktree", () => {
     git(["add", "."]);
     git(["commit", "-m", "agent commit"]);
 
-    const wt = createWorktree(TEMP_REPO, "abcdef123456", "follow-up work");
+    const wt = await createWorktree(TEMP_REPO, "abcdef123456", "follow-up work");
 
     try {
       expect(wt.baseBranch).toBe("main");
@@ -93,5 +100,54 @@ describe("createWorktree", () => {
       await removeWorktree(TEMP_REPO, wt.worktreePath);
       git(["branch", "-D", wt.branchName]);
     }
+  });
+});
+
+describe("async git helpers", () => {
+  it("auto-commits worktree changes without blocking the event loop", async () => {
+    const wt = await createWorktree(TEMP_REPO, "abcdef123456", "follow-up work");
+
+    try {
+      writeFileSync(join(wt.worktreePath, "file.txt"), "worktree change\n");
+
+      await autoCommitWorktree(wt.worktreePath, "follow-up work", "abcdef123456", wt.branchName);
+
+      expect(git(["log", "-1", "--pretty=%B"], wt.worktreePath)).toBe("agent: follow-up work");
+      expect(git(["diff", "--name-only", "main...HEAD"], wt.worktreePath)).toBe("file.txt");
+    } finally {
+      await removeWorktree(TEMP_REPO, wt.worktreePath);
+      git(["branch", "-D", wt.branchName]);
+    }
+  });
+
+  it("gathers diff stats asynchronously", async () => {
+    git(["checkout", "-b", "feature/stats"]);
+    writeFileSync(join(TEMP_REPO, "file.txt"), "main\nstats change\n");
+    git(["add", "file.txt"]);
+    git(["commit", "-m", "stats change"]);
+
+    const stats = await getBranchDiffStatsAsync(TEMP_REPO, "main", "feature/stats");
+
+    expect(stats.filesChanged).toBe(1);
+    expect(stats.insertions).toBe(1);
+    expect(stats.deletions).toBe(0);
+    expect(stats.diffStat).toContain("file.txt");
+  });
+
+  it("detects conflicts asynchronously", async () => {
+    git(["checkout", "-b", "feature/conflict"]);
+    writeFileSync(join(TEMP_REPO, "file.txt"), "feature change\n");
+    git(["add", "file.txt"]);
+    git(["commit", "-m", "feature change"]);
+
+    git(["checkout", "main"]);
+    writeFileSync(join(TEMP_REPO, "file.txt"), "main change\n");
+    git(["add", "file.txt"]);
+    git(["commit", "-m", "main change"]);
+
+    const conflictInfo = await detectConflictsAsync(TEMP_REPO, "main", "feature/conflict");
+
+    expect(typeof conflictInfo).toBe("string");
+    expect(conflictInfo).toContain("CONFLICT");
   });
 });
