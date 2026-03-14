@@ -134,9 +134,7 @@ Output ONLY the synthesized system prompt text. No explanations, no preamble, no
       const truncated = msg.stop_reason === "max_tokens";
       return { prompt: text, model: resolvedModel, usage: msg.usage, truncated };
     } catch (e) {
-      if (e.status === 429) return reply.code(429).send({ error: "Rate limited — try again in a moment" });
-      if (e.status === 529) return reply.code(503).send({ error: "AI service overloaded — try again later" });
-      if (e.status === 401) return reply.code(502).send({ error: "Server API key is invalid — contact admin" });
+      if (handleAnthropicError(e, reply)) return;
       const status = e.status ?? 500;
       return reply.code(status).send({ error: e.message ?? "Synthesis failed" });
     }
