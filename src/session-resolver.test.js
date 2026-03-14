@@ -184,7 +184,7 @@ function createTestDb() {
   function deduplicateSessions() {
     const dupes = db.prepare(`
       SELECT project_dir, GROUP_CONCAT(id) as ids
-      FROM sessions WHERE status = 'active'
+      FROM (SELECT project_dir, id FROM sessions WHERE status = 'active' ORDER BY id)
       GROUP BY project_dir HAVING COUNT(*) > 1
     `).all();
 
@@ -199,6 +199,8 @@ function createTestDb() {
           db.prepare(`UPDATE events SET session_id = $keep WHERE session_id = $id`)
             .run({ $keep: keep, $id: id });
           db.prepare(`UPDATE agents SET session_id = $keep WHERE session_id = $id`)
+            .run({ $keep: keep, $id: id });
+          db.prepare(`UPDATE worktrees SET session_id = $keep WHERE session_id = $id`)
             .run({ $keep: keep, $id: id });
           db.prepare(`DELETE FROM sessions WHERE id = $id`).run({ $id: id });
         }

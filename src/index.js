@@ -147,6 +147,13 @@ import craftingRoutes, { resetClient as resetCraftingClient } from "./routes/cra
  */
 import directoryRoutes from "./routes/directories.js";
 
+/**
+ * @see {@link ./routes/flint.js} — Mobey MCP proxy for /flint dashboard page.
+ * Endpoints: `GET /api/flint/status`, `GET /api/flint/todos`.
+ * Requires `MOBEY_API_KEY` env var.
+ */
+import flintRoutes from "./routes/flint.js";
+
 /** @type {number} Server listen port, overridable via PORT env var. */
 const PORT = process.env.PORT ?? 3001;
 
@@ -231,6 +238,7 @@ await app.register(diffSummaryRoutes);  // POST/GET         /api/sessions/:id/di
 await app.register(commitRoutes);       // POST             /api/sessions/:id/commit
 await app.register(craftingRoutes);     // GET/POST/PUT/DELETE /api/craft/{agents,recipes}, POST /api/craft/synthesize
 await app.register(directoryRoutes);   // GET              /api/directories
+await app.register(flintRoutes);       // GET              /api/flint/status, /api/flint/todos
 
 /**
  * Clean up duplicate sessions from prior TOCTOU races in resolveSessionId().

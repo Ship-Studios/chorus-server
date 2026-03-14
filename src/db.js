@@ -512,6 +512,13 @@ export function deduplicateSessions() {
           .run({ $keep: keep, $id: id });
         db.prepare(`UPDATE agents SET session_id = $keep WHERE session_id = $id`)
           .run({ $keep: keep, $id: id });
+        // Remove worktrees from the duplicate session that would conflict with
+        // an existing (session_id, branch_name) row on the canonical session.
+        db.prepare(`
+          DELETE FROM worktrees
+          WHERE session_id = $id
+            AND branch_name IN (SELECT branch_name FROM worktrees WHERE session_id = $keep)
+        `).run({ $keep: keep, $id: id });
         db.prepare(`UPDATE worktrees SET session_id = $keep WHERE session_id = $id`)
           .run({ $keep: keep, $id: id });
         if (dup?.git_root) {

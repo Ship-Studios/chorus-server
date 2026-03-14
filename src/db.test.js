@@ -21,6 +21,7 @@ function createTestDb() {
       id TEXT PRIMARY KEY,
       project_dir TEXT NOT NULL,
       worktree_dir TEXT,
+      git_root TEXT,
       status TEXT NOT NULL DEFAULT 'active',
       model TEXT,
       current_claude_session_id TEXT,
@@ -80,8 +81,8 @@ function createTestDb() {
 
   const stmts = {
     upsertSession: db.prepare(`
-      INSERT INTO sessions (id, project_dir, worktree_dir, status, model, current_claude_session_id)
-      VALUES ($id, $projectDir, $worktreeDir, $status, $model, $currentClaudeSessionId)
+      INSERT INTO sessions (id, project_dir, worktree_dir, git_root, status, model, current_claude_session_id)
+      VALUES ($id, $projectDir, $worktreeDir, $gitRoot, $status, $model, $currentClaudeSessionId)
       ON CONFLICT(id) DO UPDATE SET
         status = $status,
         model = COALESCE($model, sessions.model),
@@ -94,6 +95,7 @@ function createTestDb() {
           WHEN $worktreeDir = '__clear__' THEN NULL
           ELSE COALESCE($worktreeDir, sessions.worktree_dir)
         END,
+        git_root = COALESCE($gitRoot, sessions.git_root),
         current_claude_session_id = COALESCE($currentClaudeSessionId, sessions.current_claude_session_id),
         last_seen_at = datetime('now')
     `),
@@ -105,11 +107,11 @@ function createTestDb() {
     getAlias: db.prepare(`SELECT dashboard_session_id FROM session_aliases WHERE claude_session_id = $claudeSessionId`),
     insertAlias: db.prepare(`INSERT OR REPLACE INTO session_aliases (claude_session_id, dashboard_session_id) VALUES ($claudeSessionId, $dashboardSessionId)`),
     findActiveSessionByDir: db.prepare(`
-      SELECT id FROM sessions WHERE project_dir = $projectDir AND status = 'active'
+      SELECT id, git_root FROM sessions WHERE project_dir = $projectDir AND status = 'active'
       ORDER BY last_seen_at DESC LIMIT 1
     `),
     findRecentSessionByDir: db.prepare(`
-      SELECT id FROM sessions WHERE project_dir = $projectDir AND last_seen_at >= datetime('now', '-30 minutes')
+      SELECT id, git_root FROM sessions WHERE project_dir = $projectDir AND status = 'active' AND last_seen_at >= datetime('now', '-30 minutes')
       ORDER BY last_seen_at DESC LIMIT 1
     `),
     insertEvent: db.prepare(`
@@ -221,6 +223,7 @@ describe("resolveSessionId", () => {
       $worktreeDir: null,
       $status: "active",
       $model: null,
+      $gitRoot: null,
       $currentClaudeSessionId: null,
     });
 
@@ -229,21 +232,21 @@ describe("resolveSessionId", () => {
     expect(id).toBe("dash-1");
   });
 
-  it("does not alias to stopped sessions via the active path", () => {
+  it("does not alias to stopped sessions via either active or recent path", () => {
     t.upsertSession.run({
       $id: "dash-1",
       $projectDir: "/project/a",
       $worktreeDir: null,
+      $gitRoot: null,
       $status: "stopped",
       $model: null,
       $currentClaudeSessionId: null,
     });
 
-    // Stopped session — recent query may match since last_seen_at is 'now',
-    // but the active path should not match
+    // Both findActiveSessionByDir and findRecentSessionByDir now require status = 'active'.
+    // A stopped session should never be aliased to — even if last_seen_at is recent.
     const id = t.resolveSessionId("cli-2", "/project/a");
-    // Should still resolve (via recent path since last_seen_at is recent)
-    expect(id).toBe("dash-1");
+    expect(id).toBe("cli-2");
   });
 
   it("creates new session for different project dir", () => {
@@ -253,6 +256,7 @@ describe("resolveSessionId", () => {
       $worktreeDir: null,
       $status: "active",
       $model: null,
+      $gitRoot: null,
       $currentClaudeSessionId: null,
     });
 
@@ -268,6 +272,7 @@ describe("resolveSessionId", () => {
       $worktreeDir: null,
       $status: "active",
       $model: null,
+      $gitRoot: null,
       $currentClaudeSessionId: null,
     });
 
@@ -287,6 +292,7 @@ describe("resolveSessionId", () => {
       $worktreeDir: null,
       $status: "active",
       $model: null,
+      $gitRoot: null,
       $currentClaudeSessionId: null,
     });
 
@@ -342,6 +348,7 @@ describe("deleteSession", () => {
       $worktreeDir: null,
       $status: "active",
       $model: null,
+      $gitRoot: null,
       $currentClaudeSessionId: null,
     });
     expect(t.deleteSession("s1")).toBe(false);
@@ -356,6 +363,7 @@ describe("deleteSession", () => {
       $worktreeDir: null,
       $status: "stopped",
       $model: null,
+      $gitRoot: null,
       $currentClaudeSessionId: null,
     });
     expect(t.deleteSession("s1")).toBe(true);
@@ -365,7 +373,7 @@ describe("deleteSession", () => {
   it("cascade-deletes events", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "stopped", $model: null, $currentClaudeSessionId: null,
+      $status: "stopped", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.insertEvent.get({
       $sessionId: "s1", $type: "tool_use", $toolName: "Read",
@@ -380,7 +388,7 @@ describe("deleteSession", () => {
   it("cascade-deletes agents", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "stopped", $model: null, $currentClaudeSessionId: null,
+      $status: "stopped", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     const { id: eventId } = t.insertEvent.get({
       $sessionId: "s1", $type: "tool_use", $toolName: "Agent",
@@ -399,7 +407,7 @@ describe("deleteSession", () => {
   it("cascade-deletes worktrees", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "stopped", $model: null, $currentClaudeSessionId: null,
+      $status: "stopped", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.insertWorktree.get({
       $sessionId: "s1", $branchName: "agent/test-abc123",
@@ -414,7 +422,7 @@ describe("deleteSession", () => {
   it("cascade-deletes aliases", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "stopped", $model: null, $currentClaudeSessionId: null,
+      $status: "stopped", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.insertAlias.run({ $claudeSessionId: "cli-1", $dashboardSessionId: "s1" });
     t.insertAlias.run({ $claudeSessionId: "cli-2", $dashboardSessionId: "s1" });
@@ -427,7 +435,7 @@ describe("deleteSession", () => {
   it("deletes error-status session", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "error", $model: null, $currentClaudeSessionId: null,
+      $status: "error", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     expect(t.deleteSession("s1")).toBe(true);
   });
@@ -442,11 +450,11 @@ describe("upsertSession", () => {
   it("preserves model on null update", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: "opus-4", $currentClaudeSessionId: null,
+      $status: "active", $model: "opus-4", $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     const session = t.getSession.get({ $id: "s1" });
     expect(session.model).toBe("opus-4");
@@ -455,11 +463,11 @@ describe("upsertSession", () => {
   it("updates model when new value is provided", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: "opus-4", $currentClaudeSessionId: null,
+      $status: "active", $model: "opus-4", $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: "sonnet-4", $currentClaudeSessionId: null,
+      $status: "active", $model: "sonnet-4", $gitRoot: null, $currentClaudeSessionId: null,
     });
     const session = t.getSession.get({ $id: "s1" });
     expect(session.model).toBe("sonnet-4");
@@ -468,11 +476,11 @@ describe("upsertSession", () => {
   it("does not overwrite project_dir with 'unknown'", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/real/path", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s1", $projectDir: "unknown", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     const session = t.getSession.get({ $id: "s1" });
     expect(session.project_dir).toBe("/real/path");
@@ -481,11 +489,11 @@ describe("upsertSession", () => {
   it("upgrades project_dir from 'unknown' to real path", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "unknown", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s1", $projectDir: "/real/path", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     const session = t.getSession.get({ $id: "s1" });
     expect(session.project_dir).toBe("/real/path");
@@ -494,11 +502,11 @@ describe("upsertSession", () => {
   it("preserves worktree_dir on null update", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: "/wt",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     const session = t.getSession.get({ $id: "s1" });
     expect(session.worktree_dir).toBe("/wt");
@@ -511,7 +519,7 @@ describe("upsertSession", () => {
     });
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     const session = t.getSession.get({ $id: "s1" });
     expect(session.current_claude_session_id).toBe("real-cli-id");
@@ -527,7 +535,7 @@ describe("worktree constraints", () => {
   it("upserts on duplicate (session_id, branch_name)", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     t.insertWorktree.get({
@@ -550,11 +558,11 @@ describe("worktree constraints", () => {
   it("allows same branch name for different sessions", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p1", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s2", $projectDir: "/p2", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     t.insertWorktree.get({
@@ -580,13 +588,13 @@ describe("upsertSession worktree_dir clearing", () => {
   it("clears worktree_dir when __clear__ sentinel is passed", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/project/root", $worktreeDir: "/stale/worktree",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/stale/worktree");
 
     t.upsertSession.run({
       $id: "s1", $projectDir: "/project/root", $worktreeDir: "__clear__",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBeNull();
   });
@@ -594,11 +602,11 @@ describe("upsertSession worktree_dir clearing", () => {
   it("preserves worktree_dir when null is passed (COALESCE behavior)", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: "/existing/wt",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/existing/wt");
   });
@@ -606,11 +614,11 @@ describe("upsertSession worktree_dir clearing", () => {
   it("sets worktree_dir when a real path is passed", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: "/new/worktree",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/new/worktree");
   });
@@ -618,19 +626,19 @@ describe("upsertSession worktree_dir clearing", () => {
   it("can re-set worktree_dir after clearing", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: "/old",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     // Clear
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: "__clear__",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBeNull();
 
     // Re-set
     t.upsertSession.run({
       $id: "s1", $projectDir: "/p", $worktreeDir: "/new",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/new");
   });
