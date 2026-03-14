@@ -26,7 +26,7 @@ export function debouncedDiffInvalidation(sessionId) {
  * Cancels all pending diff debounce timers.
  * Used during server shutdown to ensure a clean exit.
  */
-export function clearDiffTimer() {
+export function clearDiffTimers() {
   for (const timer of diffTimers.values()) clearTimeout(timer);
   diffTimers.clear();
 }

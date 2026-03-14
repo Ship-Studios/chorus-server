@@ -1,8 +1,97 @@
 /**
- * Project architecture scanner.
+ * @file architecture.js
+ * @module architecture
  *
- * Walks a project directory, discovers source files, parses import relationships,
- * and builds an ArchNode tree + data-flow edges for the FractalArchitecture component.
+ * Project source architecture scanner and import-graph builder.
+ *
+ * Scans a project directory tree (up to 400 files, depth 8), extracts
+ * import/require relationships across JS/TS/Svelte/Vue/Python/Go sources,
+ * and produces two data structures:
+ *
+ *   - `tree`  — a nested {@link ArchNode} hierarchy mirroring the directory
+ *               layout, with semantic labels ("UI components", "Route handlers")
+ *               and palette colors assigned per top-level group.
+ *   - `flows` — the top-15 cross-group {@link Flow} edges derived from
+ *               aggregated import counts (e.g. `routes → db: 7 imports`).
+ *
+ * ## Exports
+ *
+ * - `getArchitecture(projectDir)` — **public entry point** with a 30-second
+ *   in-memory cache keyed on `projectDir`. Use this in route handlers.
+ * - `scanArchitecture(projectDir)` — uncached scan; called internally by
+ *   `getArchitecture`. Exported for testing.
+ *
+ * ## Data pipeline
+ *
+ * ```
+ * getArchitecture(projectDir)        ← public entry point (30s in-memory cache)
+ *   └─ scanArchitecture(projectDir)
+ *        ├─ walk()                   ← recursive fs walk, max 400 files / depth 8
+ *        │    └─ parseImports()      ← regex-based import extractor (ES/CJS/Python/Go)
+ *        ├─ buildDirectoryTree()     ← flat file list → ArchNode hierarchy + palette colors
+ *        └─ resolveFlows()           ← import map → cross-group Flow edges (top 15)
+ *              ├─ detectAliases()    ← infers $lib/@/~ path aliases from file layout
+ *              ├─ computeGroupDepth()← monorepo-aware grouping (packages/*, apps/*)
+ *              └─ nearestGroupDir()  ← finds the architectural boundary for a file
+ * ```
+ *
+ * ## Output shape
+ *
+ * ```js
+ * {
+ *   tree: ArchNode,   // root node; id = "root", children[] mirrors directory layout
+ *   flows: Flow[],    // ≤15 directed edges, sorted by import count descending
+ * }
+ * ```
+ *
+ * ## Consumers
+ *
+ *   - `GET /api/sessions/:id/architecture` route (via `routes/architecture.js`)
+ *   - `FractalArchitecture.svelte` — fractal zoom tree visualization
+ *   - `MermaidArchitecture.svelte` — Mermaid diagram generator
+ *
+ * ## Limits & performance
+ *
+ * - Max 400 files and depth 8 per scan to keep latency acceptable.
+ * - Files larger than 256 KB are skipped for import parsing (stat check before read).
+ * - Config files (JSON/YAML) at the project root are excluded to avoid noise.
+ * - Results are cached for 30 seconds per `projectDir` to avoid redundant fs I/O.
+ * - Monorepo containers (`packages/`, `apps/`, etc.) are detected automatically;
+ *   flow edges use the second-level directory as the architectural boundary.
+ *
+ * @example
+ * import { getArchitecture } from './architecture.js';
+ * const { tree, flows } = await getArchitecture('/path/to/project');
+ * // tree.id === "root", tree.children[0].color === "#4493f8" (blue)
+ * // flows[0] → { from: "src/routes", to: "src/db", label: "7 imports" }
+ */
+
+/**
+ * A node in the architectural directory tree.
+ *
+ * Leaf nodes (files) have no `children` property.
+ * Interior nodes (directories) always have a `children` array.
+ * The root node always has `id: "root"`.
+ *
+ * @typedef {object} ArchNode
+ * @property {string}     id       - Unique identifier; relative path from project root, or "root".
+ * @property {string}     name     - Display name (file/directory name, or "pkg/sub" for collapsed paths).
+ * @property {string}     desc     - Human-readable description, e.g. "Svelte component", "Route handlers (4 items)".
+ * @property {string}     color    - Hex color from the palette, used by the visualization layer.
+ * @property {ArchNode[]} [children] - Child nodes; absent on leaf (file) nodes.
+ */
+
+/**
+ * A directed data-flow edge between two architectural groups.
+ *
+ * Edges represent the aggregate import relationships between two top-level
+ * directory groups (e.g. `routes → db`, `components → stores`). Only the top
+ * 15 edges by import count are returned.
+ *
+ * @typedef {object} Flow
+ * @property {string} from  - Relative path of the source group directory.
+ * @property {string} to    - Relative path of the target group directory.
+ * @property {string} label - Human-readable edge label, e.g. "3 imports".
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -10,6 +99,11 @@ import { join, relative, extname, basename, dirname, sep } from "node:path";
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
+/**
+ * Directories that are never descended into during the fs walk.
+ * Covers generated output, dependency trees, IDE metadata, and mobile-native
+ * build directories that would drown the results in noise.
+ */
 const IGNORE_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".svelte-kit", ".next", ".nuxt",
   "__pycache__", ".venv", "venv", "coverage", ".turbo", ".cache", ".output",
@@ -17,17 +111,32 @@ const IGNORE_DIRS = new Set([
   ".svelte-kit", "android", "ios", ".gradle", ".idea", ".vscode",
 ]);
 
+/**
+ * File extensions whose content is parsed for import relationships.
+ * Covers the major web, systems, and scripting languages. Any extension not
+ * in this set (and not in CONFIG_EXTS) is silently skipped.
+ */
 const SOURCE_EXTS = new Set([
   ".js", ".ts", ".jsx", ".tsx", ".svelte", ".vue",
   ".py", ".rb", ".go", ".rs", ".java", ".kt", ".swift",
   ".css", ".scss", ".less", ".html",
 ]);
 
+/**
+ * Config/data extensions included in the tree but NOT parsed for imports.
+ * Root-level config files (e.g. `package.json`, `tsconfig.json`) are excluded
+ * from the scan to reduce clutter on the root node.
+ */
 const CONFIG_EXTS = new Set([".json", ".yaml", ".yml", ".toml"]);
 
+/** Hard cap on discovered files per scan. Keeps memory and latency bounded. */
 const MAX_FILES = 400;
+
+/** Maximum directory recursion depth. Prevents runaway walks in deep trees. */
 const MAX_DEPTH = 8;
-const MAX_FILE_SIZE = 256 * 1024; // 256KB — skip huge files for import parsing
+
+/** Files larger than this are included in the tree but skipped for import parsing. */
+const MAX_FILE_SIZE = 256 * 1024; // 256 KB
 
 // ── Color palette ───────────────────────────────────────────────────────────
 
