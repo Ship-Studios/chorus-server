@@ -507,6 +507,8 @@ export function deduplicateSessions() {
           .run({ $keep: keep, $id: id });
         db.prepare(`UPDATE agents SET session_id = $keep WHERE session_id = $id`)
           .run({ $keep: keep, $id: id });
+        db.prepare(`UPDATE worktrees SET session_id = $keep WHERE session_id = $id`)
+          .run({ $keep: keep, $id: id });
         if (dup?.git_root) {
           updateSessionGitRoot.run({ $id: keep, $gitRoot: dup.git_root });
         }
