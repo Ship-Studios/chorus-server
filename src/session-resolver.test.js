@@ -18,6 +18,7 @@ function createTestDb() {
       id TEXT PRIMARY KEY,
       project_dir TEXT NOT NULL,
       worktree_dir TEXT,
+      git_root TEXT,
       status TEXT NOT NULL DEFAULT 'active',
       model TEXT,
       current_claude_session_id TEXT,
@@ -71,8 +72,8 @@ function createTestDb() {
 
   const stmts = {
     upsertSession: db.prepare(`
-      INSERT INTO sessions (id, project_dir, worktree_dir, status, model, current_claude_session_id)
-      VALUES ($id, $projectDir, $worktreeDir, $status, $model, $currentClaudeSessionId)
+      INSERT INTO sessions (id, project_dir, worktree_dir, git_root, status, model, current_claude_session_id)
+      VALUES ($id, $projectDir, $worktreeDir, $gitRoot, $status, $model, $currentClaudeSessionId)
       ON CONFLICT(id) DO UPDATE SET
         status = $status,
         model = COALESCE($model, sessions.model),
@@ -85,6 +86,7 @@ function createTestDb() {
           WHEN $worktreeDir = '__clear__' THEN NULL
           ELSE COALESCE($worktreeDir, sessions.worktree_dir)
         END,
+        git_root = COALESCE($gitRoot, sessions.git_root),
         current_claude_session_id = COALESCE($currentClaudeSessionId, sessions.current_claude_session_id),
         last_seen_at = datetime('now')
     `),
@@ -97,7 +99,15 @@ function createTestDb() {
       ORDER BY last_seen_at DESC LIMIT 1
     `),
     findRecentSessionByDir: db.prepare(`
-      SELECT id FROM sessions WHERE project_dir = $projectDir AND last_seen_at >= datetime('now', '-30 minutes')
+      SELECT id FROM sessions WHERE project_dir = $projectDir AND status = 'active' AND last_seen_at >= datetime('now', '-30 minutes')
+      ORDER BY last_seen_at DESC LIMIT 1
+    `),
+    findActiveSessionByGitRoot: db.prepare(`
+      SELECT id FROM sessions WHERE git_root = $gitRoot AND status = 'active'
+      ORDER BY last_seen_at DESC LIMIT 1
+    `),
+    findRecentSessionByGitRoot: db.prepare(`
+      SELECT id FROM sessions WHERE git_root = $gitRoot AND status = 'active' AND last_seen_at >= datetime('now', '-30 minutes')
       ORDER BY last_seen_at DESC LIMIT 1
     `),
     getActiveSessionsByDir: db.prepare(`
@@ -116,13 +126,23 @@ function createTestDb() {
    * Transactional resolveSessionId — mirrors the production fix.
    * Wraps the check-then-create logic in db.transaction() so concurrent
    * callers serialize and the second one sees the first's writes.
+   *
+   * @param {string} claudeSessionId
+   * @param {string} projectDir
+   * @param {{ gitRootInfo?: { root: string, topLevel: string } | null }} opts
+   *   Pass gitRootInfo to exercise the git-root matching path in tests.
    */
-  function resolveSessionId(claudeSessionId, projectDir) {
+  function resolveSessionId(claudeSessionId, projectDir, { gitRootInfo = null } = {}) {
+    const needsProjectDir = projectDir && projectDir !== "unknown";
+    const gitRoot = gitRootInfo?.root ?? null;
+    const topLevel = gitRootInfo?.topLevel ?? null;
+    const useGitRootMatch = gitRoot !== null && projectDir === topLevel;
+
     return db.transaction(() => {
       const existing = stmts.getAlias.get({ $claudeSessionId: claudeSessionId });
       if (existing) return existing.dashboard_session_id;
 
-      if (projectDir && projectDir !== "unknown") {
+      if (needsProjectDir) {
         const active = stmts.findActiveSessionByDir.get({ $projectDir: projectDir });
         if (active) {
           stmts.insertAlias.run({ $claudeSessionId: claudeSessionId, $dashboardSessionId: active.id });
@@ -133,12 +153,25 @@ function createTestDb() {
           stmts.insertAlias.run({ $claudeSessionId: claudeSessionId, $dashboardSessionId: recent.id });
           return recent.id;
         }
+
+        if (useGitRootMatch) {
+          const activeRoot = stmts.findActiveSessionByGitRoot.get({ $gitRoot: gitRoot });
+          if (activeRoot) {
+            stmts.insertAlias.run({ $claudeSessionId: claudeSessionId, $dashboardSessionId: activeRoot.id });
+            return activeRoot.id;
+          }
+          const recentRoot = stmts.findRecentSessionByGitRoot.get({ $gitRoot: gitRoot });
+          if (recentRoot) {
+            stmts.insertAlias.run({ $claudeSessionId: claudeSessionId, $dashboardSessionId: recentRoot.id });
+            return recentRoot.id;
+          }
+        }
       }
 
       stmts.insertAlias.run({ $claudeSessionId: claudeSessionId, $dashboardSessionId: claudeSessionId });
       stmts.upsertSession.run({
         $id: claudeSessionId, $projectDir: projectDir || "unknown",
-        $worktreeDir: null, $status: "active", $model: null,
+        $worktreeDir: null, $gitRoot: gitRoot, $status: "active", $model: null,
         $currentClaudeSessionId: claudeSessionId,
       });
       return claudeSessionId;
@@ -248,15 +281,15 @@ describe("deduplicateSessions", () => {
     // Manually create 3 duplicate sessions (simulating the old race condition)
     t.upsertSession.run({
       $id: "s1", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s2", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s3", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     const merged = t.deduplicateSessions();
@@ -270,11 +303,11 @@ describe("deduplicateSessions", () => {
   it("re-parents events from duplicate sessions", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s2", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     // Add event to s2 (the duplicate that will be removed)
@@ -294,11 +327,11 @@ describe("deduplicateSessions", () => {
   it("re-parents aliases from duplicate sessions", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s2", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.insertAlias.run({ $claudeSessionId: "cli-99", $dashboardSessionId: "s2" });
 
@@ -312,11 +345,11 @@ describe("deduplicateSessions", () => {
   it("does not touch sessions with different project_dirs", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s2", $projectDir: "/project/b", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     const merged = t.deduplicateSessions();
@@ -330,11 +363,11 @@ describe("deduplicateSessions", () => {
   it("does not touch stopped sessions", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
     t.upsertSession.run({
       $id: "s2", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "stopped", $model: null, $currentClaudeSessionId: null,
+      $status: "stopped", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     const merged = t.deduplicateSessions();
@@ -344,7 +377,7 @@ describe("deduplicateSessions", () => {
   it("returns 0 when no duplicates exist", () => {
     t.upsertSession.run({
       $id: "s1", $projectDir: "/project/a", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     const merged = t.deduplicateSessions();
@@ -392,6 +425,7 @@ describe("subdirectory guard and worktree_dir clearing", () => {
           : null,
       $status: "active",
       $model: null,
+      $gitRoot: null,
       $currentClaudeSessionId: null,
     });
 
@@ -402,7 +436,7 @@ describe("subdirectory guard and worktree_dir clearing", () => {
     // Create parent session
     t.upsertSession.run({
       $id: "dash-1", $projectDir: "/home/user/project", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     // Simulate a hook from inside a submodule
@@ -421,7 +455,7 @@ describe("subdirectory guard and worktree_dir clearing", () => {
   it("DOES set worktree_dir for external worktree (different path)", () => {
     t.upsertSession.run({
       $id: "dash-1", $projectDir: "/home/user/project", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     const result = simulateSessionRegistration(t, {
@@ -440,7 +474,7 @@ describe("subdirectory guard and worktree_dir clearing", () => {
     t.upsertSession.run({
       $id: "dash-1", $projectDir: "/home/user/project",
       $worktreeDir: "/home/user/project/packages/stale-submodule",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     // Normal heartbeat from the correct project_dir
@@ -459,7 +493,7 @@ describe("subdirectory guard and worktree_dir clearing", () => {
   it("does not clear worktree_dir if session has no existing worktree_dir", () => {
     t.upsertSession.run({
       $id: "dash-1", $projectDir: "/home/user/project", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     const result = simulateSessionRegistration(t, {
@@ -478,7 +512,7 @@ describe("subdirectory guard and worktree_dir clearing", () => {
     t.upsertSession.run({
       $id: "dash-1", $projectDir: "/home/user/project",
       $worktreeDir: "/tmp/worktrees/feature-branch",
-      $status: "active", $model: null, $currentClaudeSessionId: null,
+      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
     });
 
     // Another worktree session arrives — overwrites with new worktree
@@ -491,5 +525,75 @@ describe("subdirectory guard and worktree_dir clearing", () => {
     expect(result.isWorktree).toBe(true);
     const session = t.getSession.get({ $id: "dash-1" });
     expect(session.worktree_dir).toBe("/tmp/worktrees/another-branch");
+  });
+});
+
+// ─── Git-root matching: monorepo subdirectory isolation ───────────────────────
+
+describe("git-root matching: monorepo subdirectory isolation", () => {
+  let t;
+  beforeEach(() => { t = createTestDb(); });
+
+  it("linked worktree (projectDir === topLevel) merges with main checkout", () => {
+    // Main checkout at /repo — creates session "main-cli"
+    const mainId = t.resolveSessionId("main-cli", "/repo", {
+      gitRootInfo: { root: "/repo", topLevel: "/repo" },
+    });
+    expect(mainId).toBe("main-cli");
+
+    // Linked worktree at /repo-wt/feat — topLevel is its own checkout root, root is /repo
+    // projectDir (/repo-wt/feat) === topLevel (/repo-wt/feat) → useGitRootMatch = true
+    const wtId = t.resolveSessionId("wt-cli", "/repo-wt/feat", {
+      gitRootInfo: { root: "/repo", topLevel: "/repo-wt/feat" },
+    });
+
+    // Worktree should alias to the main checkout session
+    expect(wtId).toBe("main-cli");
+    const sessions = t.db.prepare("SELECT * FROM sessions WHERE status = 'active'").all();
+    expect(sessions).toHaveLength(1);
+  });
+
+  it("monorepo subdirectories (projectDir !== topLevel) stay separate", () => {
+    // Both packages share git root /repo, but neither is running at the repo root.
+    // topLevel = /repo, but projectDir = /repo/packages/server → useGitRootMatch = false
+    const serverId = t.resolveSessionId("server-cli", "/repo/packages/server", {
+      gitRootInfo: { root: "/repo", topLevel: "/repo" },
+    });
+    expect(serverId).toBe("server-cli");
+
+    const uiId = t.resolveSessionId("ui-cli", "/repo/packages/ui", {
+      gitRootInfo: { root: "/repo", topLevel: "/repo" },
+    });
+
+    // Each package should have its own independent session
+    expect(uiId).toBe("ui-cli");
+    expect(serverId).not.toBe(uiId);
+    const sessions = t.db.prepare("SELECT * FROM sessions WHERE status = 'active'").all();
+    expect(sessions).toHaveLength(2);
+  });
+
+  it("null gitRootInfo never triggers git-root match", () => {
+    t.resolveSessionId("cli-a", "/some/dir", { gitRootInfo: null });
+    const id = t.resolveSessionId("cli-b", "/other/dir", { gitRootInfo: null });
+
+    expect(id).toBe("cli-b");
+    const sessions = t.db.prepare("SELECT * FROM sessions WHERE status = 'active'").all();
+    expect(sessions).toHaveLength(2);
+  });
+
+  it("null topLevel disables git-root match even when root is known", () => {
+    // root is known but topLevel could not be determined (e.g. --show-toplevel failed)
+    t.resolveSessionId("cli-a", "/repo", {
+      gitRootInfo: { root: "/repo", topLevel: "/repo" },
+    });
+
+    const id = t.resolveSessionId("cli-b", "/repo/sub", {
+      gitRootInfo: { root: "/repo", topLevel: null },
+    });
+
+    // topLevel is null → useGitRootMatch = false → no merge
+    expect(id).toBe("cli-b");
+    const sessions = t.db.prepare("SELECT * FROM sessions WHERE status = 'active'").all();
+    expect(sessions).toHaveLength(2);
   });
 });

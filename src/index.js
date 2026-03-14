@@ -34,6 +34,9 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import compress from "@fastify/compress";
+import underPressure from "@fastify/under-pressure";
+import etag from "@fastify/etag";
 import { Server as SocketIO } from "socket.io";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -157,6 +160,23 @@ const PORT = process.env.PORT ?? 3001;
 const app = Fastify({ logger: true });
 
 await app.register(cors, { origin: true, methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] });
+
+// Brotli/gzip compression for large GET responses (diff payloads, event lists).
+// Skip compression below 1KB — hook ACKs and small JSON don't benefit.
+await app.register(compress, { global: true, threshold: 1024, encodings: ["br", "gzip", "deflate"] });
+
+// ETags for GET endpoints — enables 304 Not Modified for the UI's 5s polling loop.
+// The browser sends If-None-Match; if content hasn't changed, no JSON is transferred.
+await app.register(etag);
+
+// Event loop pressure monitor — returns HTTP 503 when the server is overloaded.
+// Prevents WebSocket broadcast stalls during hook ingestion bursts.
+await app.register(underPressure, {
+  maxEventLoopDelay: 1000,
+  maxHeapUsedBytes: 500_000_000,
+  message: "Server under pressure",
+  retryAfter: 50,
+});
 
 /**
  * Hard cap on concurrent Socket.IO dashboard clients.

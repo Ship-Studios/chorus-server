@@ -9,6 +9,11 @@ const db = new Database(DB_PATH, { create: true });
 
 db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
+db.exec("PRAGMA synchronous = NORMAL");      // 2-5x write throughput vs FULL (safe with WAL)
+db.exec("PRAGMA cache_size = -65536");       // 64MB page cache — keeps hot sessions/events in RAM
+db.exec("PRAGMA temp_store = MEMORY");       // Sort temp tables in RAM, not disk
+db.exec("PRAGMA mmap_size = 268435456");     // 256MB memory-mapped reads — reduces syscall overhead
+db.exec("PRAGMA optimize");                  // Update query planner statistics at startup
 
 /**
  * Runs a function inside a SQLite transaction (BEGIN IMMEDIATE / COMMIT).
@@ -355,7 +360,7 @@ export const findActiveSessionByDir = db.prepare(`
 /** Finds a session ID for a project directory that was seen in the last 30 minutes. */
 export const findRecentSessionByDir = db.prepare(`
   SELECT id, git_root FROM sessions
-  WHERE project_dir = $projectDir AND last_seen_at >= datetime('now', '-30 minutes')
+  WHERE project_dir = $projectDir AND status = 'active' AND last_seen_at >= datetime('now', '-30 minutes')
   ORDER BY last_seen_at DESC
   LIMIT 1
 `);
@@ -371,7 +376,7 @@ export const findActiveSessionByGitRoot = db.prepare(`
 /** Finds a recent session that shares the same git root. */
 export const findRecentSessionByGitRoot = db.prepare(`
   SELECT id, git_root FROM sessions
-  WHERE git_root = $gitRoot AND last_seen_at >= datetime('now', '-30 minutes')
+  WHERE git_root = $gitRoot AND status = 'active' AND last_seen_at >= datetime('now', '-30 minutes')
   ORDER BY last_seen_at DESC
   LIMIT 1
 `);
@@ -490,7 +495,7 @@ export const deleteCraftRecipeStmt = db.prepare(`DELETE FROM craft_recipes WHERE
 export function deduplicateSessions() {
   const dupes = db.prepare(`
     SELECT project_dir, GROUP_CONCAT(id) as ids
-    FROM sessions WHERE status = 'active'
+    FROM (SELECT project_dir, id FROM sessions WHERE status = 'active' ORDER BY id)
     GROUP BY project_dir HAVING COUNT(*) > 1
   `).all();
 
