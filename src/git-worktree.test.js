@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -30,17 +31,9 @@ function git(args, cwd = TEMP_REPO) {
   }).trim();
 }
 
-beforeEach(() => {
-  mkdirSync(TEMP_REPO, { recursive: true });
-  git(["init", "-b", "main"]);
-  writeFileSync(join(TEMP_REPO, "file.txt"), "main\n");
-  git(["add", "."]);
-  git(["commit", "-m", "initial"]);
-});
-
-afterEach(() => {
-  rmSync(TEMP_REPO, { recursive: true, force: true });
-});
+function testWorktreeId() {
+  return randomUUID().replace(/-/g, "").slice(0, 12);
+}
 
 describe("slugify", () => {
   it("converts to lowercase with hyphens", () => {
@@ -78,6 +71,19 @@ describe("slugify", () => {
 });
 
 describe("createWorktree", () => {
+  beforeEach(() => {
+    rmSync(TEMP_REPO, { recursive: true, force: true });
+    mkdirSync(TEMP_REPO, { recursive: true });
+    git(["init", "-b", "main"]);
+    writeFileSync(join(TEMP_REPO, "file.txt"), "main\n");
+    git(["add", "."]);
+    git(["commit", "-m", "initial"]);
+  });
+
+  afterEach(() => {
+    rmSync(TEMP_REPO, { recursive: true, force: true });
+  });
+
   it("creates new worktree branches from the resolved base branch", async () => {
     git(["checkout", "-b", "feature/base"]);
     writeFileSync(join(TEMP_REPO, "base-only.txt"), "base\n");
@@ -89,7 +95,7 @@ describe("createWorktree", () => {
     git(["add", "."]);
     git(["commit", "-m", "agent commit"]);
 
-    const wt = await createWorktree(TEMP_REPO, "abcdef123456", "follow-up work");
+    const wt = await createWorktree(TEMP_REPO, testWorktreeId(), "follow-up work");
 
     try {
       expect(wt.baseBranch).toBe("main");
@@ -104,13 +110,27 @@ describe("createWorktree", () => {
 });
 
 describe("async git helpers", () => {
+  beforeEach(() => {
+    rmSync(TEMP_REPO, { recursive: true, force: true });
+    mkdirSync(TEMP_REPO, { recursive: true });
+    git(["init", "-b", "main"]);
+    writeFileSync(join(TEMP_REPO, "file.txt"), "main\n");
+    git(["add", "."]);
+    git(["commit", "-m", "initial"]);
+  });
+
+  afterEach(() => {
+    rmSync(TEMP_REPO, { recursive: true, force: true });
+  });
+
   it("auto-commits worktree changes without blocking the event loop", async () => {
-    const wt = await createWorktree(TEMP_REPO, "abcdef123456", "follow-up work");
+    const id = testWorktreeId();
+    const wt = await createWorktree(TEMP_REPO, id, "follow-up work");
 
     try {
       writeFileSync(join(wt.worktreePath, "file.txt"), "worktree change\n");
 
-      await autoCommitWorktree(wt.worktreePath, "follow-up work", "abcdef123456", wt.branchName);
+      await autoCommitWorktree(wt.worktreePath, "follow-up work", id, wt.branchName);
 
       expect(git(["log", "-1", "--pretty=%B"], wt.worktreePath)).toBe("agent: follow-up work");
       expect(git(["diff", "--name-only", "main...HEAD"], wt.worktreePath)).toBe("file.txt");

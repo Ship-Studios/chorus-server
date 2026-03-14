@@ -13,11 +13,16 @@
  *   maxFiles — maximum number of files to return (default 200, hard cap 500).
  *              When the parsed file list exceeds this limit the response
  *              includes `truncated: true` and `totalFiles: N`.
+ *   files    — comma-separated list of relative file paths to filter the diff.
+ *              When present, only the specified files are included in the
+ *              response. The global cache is bypassed for filtered requests.
+ *              Paths starting with "-" or containing "../" are rejected (400).
  *
  * ETag / 304 support: a SHA-256 of the raw diff string is computed and
  * returned as the `ETag` response header. If the request carries a matching
  * `If-None-Match` header the handler returns 304 without a body, avoiding
- * re-parsing and re-serialising an unchanged diff.
+ * re-parsing and re-serialising an unchanged diff. ETag/304 is not used for
+ * filtered requests.
  *
  * CWD validation: checks `existsSync(dir)` before spawning git to avoid
  * misleading macOS `posix_spawn` ENOENT errors that blame the git binary
@@ -33,84 +38,166 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { getSession, lookupSessionId } from "../db.js";
 import { parseDiffToFiles, buildStatSummary, runGit } from "@agent-dashboard/diff-panel/server";
+import {
+  clearInflightDiff,
+  getCachedDiff,
+  getInflightDiff,
+  setCachedDiff,
+  setInflightDiff,
+} from "../diff-cache.js";
 
 const MAX_FILES_DEFAULT = 200;
 const MAX_FILES_CAP = 500;
-
-// In-flight dedup: when diff:invalidated fires, all WS clients refetch
-// simultaneously. Without dedup, N clients spawn N identical git processes.
-// This map coalesces concurrent requests for the same directory into one.
-const inflightDiffs = new Map();
 
 /**
  * Fastify plugin for diff routes.
  *
  * @param {import("fastify").FastifyInstance} fastify - The Fastify instance.
  */
-export default async function diffRoutes(fastify) {
-  fastify.get("/api/sessions/:sessionId/diff", async (req, reply) => {
-    const sessionId = lookupSessionId(req.params.sessionId);
-    const session = getSession.get({ $id: sessionId });
-    if (!session) return reply.code(404).send({ error: "Session not found" });
+export function createDiffRoutes(deps = {}) {
+  const {
+    buildStatSummary: buildStatSummaryImpl = buildStatSummary,
+    existsSync: existsSyncImpl = existsSync,
+    getSession: getSessionImpl = getSession,
+    lookupSessionId: lookupSessionIdImpl = lookupSessionId,
+    parseDiffToFiles: parseDiffToFilesImpl = parseDiffToFiles,
+    runGit: runGitImpl = runGit,
+  } = deps;
 
-    const dir = session.worktree_dir || session.project_dir;
-    if (!dir || dir === "unknown") {
-      return reply.code(400).send({ error: "Session has no known working directory" });
-    }
+  return async function diffRoutes(fastify) {
+    fastify.get("/api/sessions/:sessionId/diff", async (req, reply) => {
+      const sessionId = lookupSessionIdImpl(req.params.sessionId);
+      const session = getSessionImpl.get({ $id: sessionId });
+      if (!session) return reply.code(404).send({ error: "Session not found" });
 
-    if (!existsSync(dir)) {
-      return reply.code(400).send({ error: `Working directory no longer exists: ${dir}` });
-    }
+      const dir = session.worktree_dir || session.project_dir;
+      if (!dir || dir === "unknown") {
+        return reply.code(400).send({ error: "Session has no known working directory" });
+      }
 
-    // Parse maxFiles query param — default 200, hard cap 500
-    const rawMax = parseInt(req.query.maxFiles, 10);
-    const maxFiles = Number.isFinite(rawMax) && rawMax > 0
-      ? Math.min(rawMax, MAX_FILES_CAP)
-      : MAX_FILES_DEFAULT;
+      if (!existsSyncImpl(dir)) {
+        return reply.code(400).send({ error: `Working directory no longer exists: ${dir}` });
+      }
 
-    // Dedup: if a diff is already running for this directory, reuse the promise
-    if (inflightDiffs.has(dir)) {
-      const cached = await inflightDiffs.get(dir);
-      return applyMaxFiles(
-        { ...cached, sessionId: req.params.sessionId },
-        maxFiles,
-        req,
-        reply,
-      );
-    }
+      // Parse maxFiles query param — default 200, hard cap 500
+      const rawMax = parseInt(req.query.maxFiles, 10);
+      const maxFiles = Number.isFinite(rawMax) && rawMax > 0
+        ? Math.min(rawMax, MAX_FILES_CAP)
+        : MAX_FILES_DEFAULT;
 
-    const promise = computeDiff(dir, req.params.sessionId);
-    inflightDiffs.set(dir, promise);
-    try {
-      const result = await promise;
-      return applyMaxFiles(result, maxFiles, req, reply);
-    } finally {
-      inflightDiffs.delete(dir);
-    }
-  });
+      // Parse optional file filter — bypasses cache entirely when present
+      const filesParam = req.query.files;
+      const fileFilter = filesParam
+        ? filesParam.split(",").map((f) => f.trim()).filter(Boolean)
+        : null;
+
+      if (fileFilter !== null) {
+        // Security: reject any path starting with "-" (flag injection) or containing "../"
+        const badPath = fileFilter.find((f) => f.startsWith("-") || f.includes("../"));
+        if (badPath) {
+          return reply.code(400).send({ error: `Invalid file path in filter: ${badPath}` });
+        }
+        return computeFilteredDiff(dir, fileFilter, req.params.sessionId, maxFiles, reply, {
+          buildStatSummary: buildStatSummaryImpl,
+          parseDiffToFiles: parseDiffToFilesImpl,
+          runGit: runGitImpl,
+        });
+      }
+
+      const cached = getCachedDiff(dir);
+      if (cached) {
+        return sendDiffResult(
+          dir,
+          cached,
+          req.params.sessionId,
+          maxFiles,
+          req,
+          reply,
+          {
+            buildStatSummary: buildStatSummaryImpl,
+            parseDiffToFiles: parseDiffToFilesImpl,
+            runGit: runGitImpl,
+          },
+        );
+      }
+
+      const inflight = getInflightDiff(dir);
+      if (inflight) {
+        const result = await inflight;
+        return sendDiffResult(
+          dir,
+          result,
+          req.params.sessionId,
+          maxFiles,
+          req,
+          reply,
+          {
+            buildStatSummary: buildStatSummaryImpl,
+            parseDiffToFiles: parseDiffToFilesImpl,
+            runGit: runGitImpl,
+          },
+        );
+      }
+
+      const promise = computeDiffBase(dir, { runGit: runGitImpl });
+      setInflightDiff(dir, promise);
+      try {
+        const result = await promise;
+        setCachedDiff(dir, result);
+        return sendDiffResult(
+          dir,
+          result,
+          req.params.sessionId,
+          maxFiles,
+          req,
+          reply,
+          {
+            buildStatSummary: buildStatSummaryImpl,
+            parseDiffToFiles: parseDiffToFilesImpl,
+            runGit: runGitImpl,
+          },
+        );
+      } finally {
+        clearInflightDiff(dir);
+      }
+    });
+  };
 }
 
+export default createDiffRoutes();
+
 /**
- * Apply ETag / 304 logic and maxFiles truncation to a computed diff result,
- * then send the reply.
+ * Returns a diff response, only materializing file hunks when the body is needed.
  *
- * @param {object} result - The raw computed diff (from computeDiff or cache).
+ * @param {string} dir - Diff cache key / working directory.
+ * @param {object} result - Cached or in-flight diff state.
+ * @param {string} sessionId - Session ID to include in the response body.
  * @param {number} maxFiles - Maximum number of files to include.
  * @param {object} req - Fastify request.
  * @param {object} reply - Fastify reply.
+ * @param {object} deps - Dependency bag.
  * @returns {object|undefined} The response object, or undefined if 304 sent.
  */
-function applyMaxFiles(result, maxFiles, req, reply) {
-  // ETag check — compare against the raw diff hash stored on the result
+async function sendDiffResult(dir, result, sessionId, maxFiles, req, reply, deps) {
   const etag = `"${result._diffHash}"`;
   reply.header("ETag", etag);
 
-  const ifNoneMatch = req.headers["if-none-match"];
-  if (ifNoneMatch && ifNoneMatch === etag) {
+  if (req.headers["if-none-match"] === etag) {
     return reply.code(304).send();
   }
 
-  // Build the public response (no internal _diffHash field)
+  const materialized = await materializeDiffResult(dir, result, deps);
+  return applyMaxFiles({ ...materialized, sessionId }, maxFiles);
+}
+
+/**
+ * Applies maxFiles truncation to an already-materialized diff result.
+ *
+ * @param {object} result - Materialized diff result.
+ * @param {number} maxFiles - Maximum number of files to include.
+ * @returns {object} Public diff payload.
+ */
+function applyMaxFiles(result, maxFiles) {
   const { _diffHash, files: allFiles, ...rest } = result;
 
   if (allFiles.length > maxFiles) {
@@ -126,39 +213,118 @@ function applyMaxFiles(result, maxFiles, req, reply) {
 }
 
 /**
- * Compute the git diff for a directory.
+ * Materializes a cached raw diff into parsed file hunks and stat summary.
  *
  * @param {string} dir - The directory to run git diff in.
- * @param {string} sessionId - The session ID.
- * @returns {Promise<object>} The diff results (includes internal `_diffHash`).
+ * @param {object} result - Cached or in-flight diff state.
+ * @param {object} deps - Dependency bag.
+ * @returns {Promise<object>} Materialized diff result.
  */
-async function computeDiff(dir, sessionId) {
-  try {
-    const rawDiff = await runGit(dir, ["diff", "HEAD", "--no-color", "--unified=5", "--submodule=diff"]);
-    const branch = await runGit(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
-    const files = parseDiffToFiles(rawDiff);
-    const _diffHash = createHash("sha256").update(rawDiff).digest("hex");
+async function materializeDiffResult(dir, result, deps) {
+  const {
+    buildStatSummary: buildStatSummaryImpl,
+    parseDiffToFiles: parseDiffToFilesImpl,
+    runGit: runGitImpl,
+  } = deps;
 
-    return {
-      sessionId,
+  if (Array.isArray(result.files)) {
+    return result;
+  }
+
+  if (result.materializePromise) {
+    return result.materializePromise;
+  }
+
+  result.materializePromise = (async () => {
+    const files = parseDiffToFilesImpl(result.rawDiff);
+    const branch = result.hasHead
+      ? await runGitImpl(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).then((value) => value.trim()).catch(() => "unknown")
+      : "unknown";
+    const materialized = {
       directory: dir,
-      branch: branch.trim(),
-      stat: buildStatSummary(files),
+      branch,
+      stat: buildStatSummaryImpl(files),
       files,
-      _diffHash,
+      _diffHash: result._diffHash,
+    };
+    setCachedDiff(dir, materialized);
+    return materialized;
+  })().finally(() => {
+    delete result.materializePromise;
+  });
+
+  return result.materializePromise;
+}
+
+/**
+ * Compute the raw git diff and hash for a directory.
+ *
+ * @param {string} dir - The directory to run git diff in.
+ * @param {object} deps - Dependency bag.
+ * @returns {Promise<object>} Raw diff state (includes internal `_diffHash`).
+ */
+async function computeDiffBase(dir, deps) {
+  const { runGit: runGitImpl } = deps;
+
+  try {
+    const rawDiff = await runGitImpl(dir, ["diff", "HEAD", "--no-color", "--unified=5", "--submodule=diff"]);
+    return {
+      directory: dir,
+      hasHead: true,
+      rawDiff,
+      _diffHash: createHash("sha256").update(rawDiff).digest("hex"),
     };
   } catch {
-    // Fallback: repos with no commits yet
-    const rawDiff = await runGit(dir, ["diff", "--no-color", "--unified=5", "--submodule=diff"]);
-    const files = parseDiffToFiles(rawDiff);
-    const _diffHash = createHash("sha256").update(rawDiff).digest("hex");
+    const rawDiff = await runGitImpl(dir, ["diff", "--no-color", "--unified=5", "--submodule=diff"]);
     return {
-      sessionId,
       directory: dir,
-      branch: "unknown",
-      stat: buildStatSummary(files),
-      files,
-      _diffHash,
+      hasHead: false,
+      rawDiff,
+      _diffHash: createHash("sha256").update(rawDiff).digest("hex"),
     };
   }
+}
+
+/**
+ * Compute and return a filtered diff for specific file paths, bypassing the
+ * global cache entirely. ETag/304 support is intentionally omitted.
+ *
+ * @param {string} dir - The working directory.
+ * @param {string[]} fileFilter - Relative file paths to include.
+ * @param {string} sessionId - Session ID to include in the response body.
+ * @param {number} maxFiles - Maximum number of files to include.
+ * @param {object} reply - Fastify reply.
+ * @param {object} deps - Dependency bag.
+ * @returns {Promise<object>} The diff response object.
+ */
+async function computeFilteredDiff(dir, fileFilter, sessionId, maxFiles, reply, deps) {
+  const {
+    buildStatSummary: buildStatSummaryImpl,
+    parseDiffToFiles: parseDiffToFilesImpl,
+    runGit: runGitImpl,
+  } = deps;
+
+  let rawDiff;
+  let hasHead = true;
+
+  try {
+    rawDiff = await runGitImpl(dir, [
+      "diff", "HEAD", "--no-color", "--unified=5", "--submodule=diff", "--",
+      ...fileFilter,
+    ]);
+  } catch {
+    hasHead = false;
+    rawDiff = await runGitImpl(dir, [
+      "diff", "--no-color", "--unified=5", "--submodule=diff", "--",
+      ...fileFilter,
+    ]);
+  }
+
+  const files = parseDiffToFilesImpl(rawDiff);
+  const branch = hasHead
+    ? await runGitImpl(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).then((v) => v.trim()).catch(() => "unknown")
+    : "unknown";
+  const stat = buildStatSummaryImpl(files);
+
+  return applyMaxFiles({ sessionId, directory: dir, branch, stat, files }, maxFiles);
 }

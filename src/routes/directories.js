@@ -3,11 +3,15 @@
  * @description Lists directories under ~/Documents/code for the sidebar navigation.
  */
 
-import { readdirSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
 const CODE_DIR = process.env.PULSE_ROOT_DIR || join(homedir(), "Documents", "code");
+const DIRECTORY_CACHE_TTL_MS = 5_000;
+
+let cachedResponse = null;
+let cachedAt = 0;
 
 /**
  * Fastify plugin for directory routes.
@@ -17,7 +21,11 @@ const CODE_DIR = process.env.PULSE_ROOT_DIR || join(homedir(), "Documents", "cod
 export default async function directoryRoutes(fastify) {
   fastify.get("/api/directories", async (_req, reply) => {
     try {
-      const entries = readdirSync(CODE_DIR, { withFileTypes: true });
+      if (cachedResponse && Date.now() - cachedAt < DIRECTORY_CACHE_TTL_MS) {
+        return cachedResponse;
+      }
+
+      const entries = await readdir(CODE_DIR, { withFileTypes: true });
       const dirs = entries
         .filter((e) => e.isDirectory() && !e.name.startsWith("."))
         .map((e) => ({
@@ -25,7 +33,10 @@ export default async function directoryRoutes(fastify) {
           path: join(CODE_DIR, e.name),
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
-      return { directories: dirs, basePath: CODE_DIR };
+
+      cachedResponse = { directories: dirs, basePath: CODE_DIR };
+      cachedAt = Date.now();
+      return cachedResponse;
     } catch (err) {
       reply.code(500);
       return { error: "Failed to list directories", message: err.message };

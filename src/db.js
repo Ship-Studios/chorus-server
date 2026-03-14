@@ -179,12 +179,28 @@ export const updateSessionStatus = db.prepare(`
   UPDATE sessions SET status = $status, last_seen_at = datetime('now') WHERE id = $id
 `);
 
+/** Marks a session active and refreshes its last_seen_at timestamp. */
+export const touchSessionActive = db.prepare(`
+  UPDATE sessions SET status = 'active', last_seen_at = datetime('now') WHERE id = $id
+`);
+
 /** Inserts a new event into the database. */
 export const insertEvent = db.prepare(`
   INSERT INTO events (session_id, type, tool_name, file_path, summary, payload)
   VALUES ($sessionId, $type, $toolName, $filePath, $summary, $payload)
   RETURNING id
 `);
+
+const insertEventFast = db.prepare(`
+  INSERT INTO events (session_id, type, tool_name, file_path, summary, payload)
+  VALUES ($sessionId, $type, $toolName, $filePath, $summary, $payload)
+`);
+
+/** Inserts an event row and returns its numeric ID without using RETURNING. */
+export function insertEventRow(params) {
+  const result = insertEventFast.run(params);
+  return Number(result.lastInsertRowid);
+}
 
 /** Retrieves a single event by its ID. */
 export const getEvent = db.prepare(`

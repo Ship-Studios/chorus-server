@@ -138,6 +138,28 @@ const MAX_DEPTH = 8;
 /** Files larger than this are included in the tree but skipped for import parsing. */
 const MAX_FILE_SIZE = 256 * 1024; // 256 KB
 
+/** Maximum number of file reads/import parses to run concurrently per directory. */
+const FILE_PARSE_CONCURRENCY = 8;
+
+async function forEachConcurrent(items, limit, worker) {
+  const concurrency = Math.min(limit, items.length);
+  if (concurrency <= 1) {
+    for (const item of items) {
+      await worker(item);
+    }
+    return;
+  }
+
+  let index = 0;
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (index < items.length) {
+      const currentIndex = index;
+      index += 1;
+      await worker(items[currentIndex]);
+    }
+  }));
+}
+
 // ── Color palette ───────────────────────────────────────────────────────────
 
 const PALETTE = [
@@ -286,6 +308,7 @@ export async function scanArchitecture(projectDir) {
       return a.name.localeCompare(b.name);
     });
 
+    const fileJobs = [];
     for (const entry of entries) {
       if (files.length >= MAX_FILES) break;
       const fullPath = join(dir, entry.name);
@@ -304,18 +327,22 @@ export async function scanArchitecture(projectDir) {
 
         // Parse imports for source files
         if (SOURCE_EXTS.has(ext)) {
-          try {
-            const s = await stat(fullPath);
-            if (s.size > MAX_FILE_SIZE) continue;
-            const content = await readFile(fullPath, "utf-8");
-            const imports = parseImports(content, ext);
-            if (imports.size > 0) fileImports.set(relPath, imports);
-          } catch {
-            // skip unreadable
-          }
+          fileJobs.push({ ext, fullPath, relPath });
         }
       }
     }
+
+    await forEachConcurrent(fileJobs, FILE_PARSE_CONCURRENCY, async ({ ext, fullPath, relPath }) => {
+      try {
+        const s = await stat(fullPath);
+        if (s.size > MAX_FILE_SIZE) return;
+        const content = await readFile(fullPath, "utf-8");
+        const imports = parseImports(content, ext);
+        if (imports.size > 0) fileImports.set(relPath, imports);
+      } catch {
+        // skip unreadable
+      }
+    });
   }
 
   // Build directory tree from file paths

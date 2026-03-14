@@ -1,7 +1,11 @@
 import chokidar from "chokidar";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
 import { debouncedDiffInvalidation } from "./broadcast.js";
+
+const execAsync = promisify(exec);
 
 /** @type {Map<string, { watcher: import("chokidar").FSWatcher, sessionIds: Set<string>, debounceTimer: ReturnType<typeof setTimeout> | null }>} */
 const watchers = new Map();
@@ -42,10 +46,22 @@ export function startWatching(sessionId, projectDir) {
   watcher.on("all", () => {
     // Debounce 300ms — git operations touch multiple files in sequence
     if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
-    entry.debounceTimer = setTimeout(() => {
+    entry.debounceTimer = setTimeout(async () => {
       entry.debounceTimer = null;
+
+      // Fetch changed files once per repo dir and share across all sessions
+      // watching the same directory. Falls back to [] on error so the UI
+      // performs a full diff fetch.
+      let changedFiles = [];
+      try {
+        const { stdout } = await execAsync(`git -C "${projectDir}" diff --name-only HEAD`);
+        changedFiles = stdout.trim().split("\n").filter(Boolean);
+      } catch {
+        changedFiles = [];
+      }
+
       for (const sid of entry.sessionIds) {
-        debouncedDiffInvalidation(sid);
+        debouncedDiffInvalidation(sid, changedFiles);
       }
     }, 300);
   });

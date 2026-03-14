@@ -18,8 +18,12 @@ import {
   updateWorktreeConflicts,
   deleteWorktreeRow,
 } from "../../db.js";
-import { parseWorktreeListPorcelain } from "../../git-worktree.js";
-import { deleteBranch, detectConflicts, removeWorktree } from "../../prompt.js";
+import {
+  deleteBranchAsync,
+  detectConflictsAsync,
+  parseWorktreeListPorcelain,
+  removeWorktree,
+} from "../../git-worktree.js";
 import { runGit } from "@agent-dashboard/diff-panel/server";
 import { invalidateDiscoveredWorktrees } from "../../worktree-discovery.js";
 import { invalidateDashboardSnapshot } from "../../dashboard-snapshot.js";
@@ -54,7 +58,7 @@ export default async function worktreeMutationRoutes(fastify) {
 
     try {
       await runGit(dir, ["merge", "--no-ff", "-m", `Merge ${wt.branch_name}: ${wt.description || "agent changes"}`, wt.branch_name]);
-      deleteBranch(dir, wt.branch_name);
+      await deleteBranchAsync(dir, wt.branch_name);
       updateWorktreeStatus.run({ $id: wt.id, $status: "merged" });
       invalidateDiscoveredWorktrees(dir);
       invalidateDashboardSnapshot();
@@ -95,7 +99,7 @@ export default async function worktreeMutationRoutes(fastify) {
         }
 
         if (wt.status !== "merged") {
-          deleteBranch(dir, wt.branch_name);
+          await deleteBranchAsync(dir, wt.branch_name);
         }
       }
     }
@@ -130,7 +134,7 @@ export default async function worktreeMutationRoutes(fastify) {
       return reply.code(400).send({ error: "Project directory not available" });
     }
 
-    const conflictInfo = detectConflicts(dir, wt.base_branch, wt.branch_name);
+    const conflictInfo = await detectConflictsAsync(dir, wt.base_branch, wt.branch_name);
     updateWorktreeConflicts.run({ $id: wt.id, $conflictInfo: conflictInfo });
     invalidateDashboardSnapshot();
     const updated = getWorktree.get({ $id: wt.id });

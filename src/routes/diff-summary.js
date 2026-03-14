@@ -33,6 +33,7 @@ import { getAnthropicFetchOptions } from "../vpn.js";
 
 // ── In-memory cache keyed on SHA-256 of diff content ────────────────────────
 const cache = new Map(); // Map<hash, { summary, model, timestamp }>
+const inflight = new Map(); // Map<hash, Promise<{ summary, model }>>
 const CACHE_TTL_MS = 600_000; // 10 minutes — safe because cache is keyed on diff content hash
 
 /**
@@ -67,112 +68,198 @@ function getCached(hash) {
 // ── Anthropic client (lazy init) ────────────────────────────────────────────
 let client = null;
 
-/**
- * Get the Anthropic client, lazily initializing it if needed.
- *
- * @returns {Anthropic|null} The Anthropic client, or null if API key is missing.
- */
-function getClient() {
-  if (!process.env.ANTHROPIC_API_KEY) return null;
-  if (!client) client = new Anthropic({ ...getAnthropicFetchOptions() });
-  return client;
-}
-
 /** Reset cached client so next call picks up new VPN/proxy config. */
 export function resetClient() { client = null; }
 
 /**
- * Fastify plugin for diff summary routes.
+ * Reset all in-process summary state for testing.
  *
- * @param {import("fastify").FastifyInstance} fastify - The Fastify instance.
+ * Clears the in-memory diff cache, the in-flight deduplication map, and the
+ * lazily-initialised Anthropic client so that each test starts from a clean
+ * slate without side-effects leaking between test cases.
+ *
+ * @remarks
+ * This is intentionally **test-only** — calling it in production discards
+ * valid cached summaries and forces a new Anthropic client (with a fresh
+ * VPN-config snapshot) to be created on the next request.  Production code
+ * should call `resetClient()` instead when only the client needs to be
+ * invalidated (e.g. after `/api/vpn/reconfigure`).
  */
-export default async function diffSummaryRoutes(fastify) {
-  // Feature availability check
-  fastify.get("/api/diff-summary/status", async () => ({
-    available: !!process.env.ANTHROPIC_API_KEY,
-  }));
+export function clearSummaryState() {
+  cache.clear();
+  inflight.clear();
+  client = null;
+}
 
-  // Generate summary for a session's current diff
-  fastify.post("/api/sessions/:sessionId/diff/summary", async (req, reply) => {
-    const anthropic = getClient();
-    if (!anthropic) {
-      return reply.code(503).send({
-        error: "Diff summary unavailable: ANTHROPIC_API_KEY not set",
-        available: false,
-      });
-    }
+/**
+ * Factory that returns a Fastify plugin registering the diff-summary routes.
+ *
+ * Accepts an optional `deps` bag for dependency injection in tests.  Every
+ * injectable dependency defaults to the real production implementation so
+ * callers only need to override what they want to stub.
+ *
+ * Registered routes:
+ *   - `GET  /api/diff-summary/status`            — feature availability probe
+ *   - `POST /api/sessions/:sessionId/diff/summary` — generate / return cached summary
+ *
+ * @param {object} [deps={}] - Optional dependency overrides (for testing).
+ * @param {typeof Anthropic} [deps.Anthropic] - Anthropic SDK constructor.
+ * @param {Function} [deps.buildStatFromShortstat] - Builds a stat object from `git diff --shortstat`.
+ * @param {Function} [deps.existsSync] - `fs.existsSync` — checks working directory existence.
+ * @param {Function} [deps.getAnthropicFetchOptions] - Returns VPN-aware fetch options for the Anthropic client.
+ * @param {Function} [deps.getSession] - Prepared statement that fetches a session row by ID.
+ * @param {Function} [deps.lookupSessionId] - Resolves a raw session ID to its canonical dashboard ID.
+ * @param {Function} [deps.runGit] - Executes a git command in a given directory.
+ * @param {Function} [deps.summarizeDiff] - Calls the Anthropic API to produce a diff summary.
+ * @returns {Function} An async Fastify plugin function.
+ */
+export function createDiffSummaryRoutes(deps = {}) {
+  const {
+    Anthropic: AnthropicImpl = Anthropic,
+    buildStatFromShortstat: buildStatFromShortstatImpl = buildStatFromShortstat,
+    existsSync: existsSyncImpl = existsSync,
+    getAnthropicFetchOptions: getAnthropicFetchOptionsImpl = getAnthropicFetchOptions,
+    getSession: getSessionImpl = getSession,
+    lookupSessionId: lookupSessionIdImpl = lookupSessionId,
+    runGit: runGitImpl = runGit,
+    summarizeDiff: summarizeDiffImpl = summarizeDiff,
+  } = deps;
 
-    const sessionId = lookupSessionId(req.params.sessionId);
-    const session = getSession.get({ $id: sessionId });
-    if (!session) return reply.code(404).send({ error: "Session not found" });
+  /**
+   * Return the lazily-initialised Anthropic client, or `null` when no API key
+   * is configured.  The module-level `client` variable is intentionally shared
+   * across requests so the same HTTP connection pool is reused.
+   *
+   * @returns {import("@anthropic-ai/sdk").Anthropic|null}
+   */
+  function getClientImpl() {
+    if (!process.env.ANTHROPIC_API_KEY) return null;
+    if (!client) client = new AnthropicImpl({ ...getAnthropicFetchOptionsImpl() });
+    return client;
+  }
 
-    const dir = session.worktree_dir || session.project_dir;
-    if (!dir || dir === "unknown") {
-      return reply.code(400).send({ error: "Session has no known working directory" });
-    }
-    if (!existsSync(dir)) {
-      return reply.code(400).send({ error: `Working directory no longer exists: ${dir}` });
-    }
+  return async function diffSummaryRoutes(fastify) {
+    /**
+     * GET /api/diff-summary/status
+     *
+     * Lightweight probe so the UI can decide whether to show the "Summarise"
+     * button without making a real summary request.  Returns `{ available: boolean }`.
+     */
+    fastify.get("/api/diff-summary/status", async () => ({
+      available: !!process.env.ANTHROPIC_API_KEY,
+    }));
 
-    // Get the current diff
-    let diff;
-    try {
-      diff = await runGit(dir, ["diff", "HEAD", "--no-color", "--unified=3", "--submodule=diff"]);
-    } catch {
-      try {
-        diff = await runGit(dir, ["diff", "--no-color", "--unified=3", "--submodule=diff"]);
-      } catch (e) {
-        return reply.code(500).send({ error: `Git error: ${e.message}` });
+    /**
+     * POST /api/sessions/:sessionId/diff/summary
+     *
+     * Generate (or return a cached) natural-language summary of the session's
+     * current `git diff HEAD`.
+     *
+     * Response shapes:
+     *   - `{ summary: null, empty: true }`               — working tree is clean
+     *   - `{ summary, model, cached: true }`             — served from LRU cache
+     *   - `{ summary, model, cached: false }`            — freshly generated
+     *
+     * Error responses (HTTP status codes):
+     *   - `503` — `ANTHROPIC_API_KEY` not set, or AI service overloaded (529)
+     *   - `404` — session not found
+     *   - `400` — session has no known / existing working directory
+     *   - `429` — Anthropic rate limit; may include `Retry-After` header
+     *   - `502` — bad API key (401) or other Anthropic error
+     *   - `500` — git command failed
+     *
+     * Concurrent requests for the same diff hash are deduplicated via the
+     * `inflight` map — only one Anthropic API call is made regardless of how
+     * many requests arrive while the first is in-flight.
+     */
+    fastify.post("/api/sessions/:sessionId/diff/summary", async (req, reply) => {
+      const anthropic = getClientImpl();
+      if (!anthropic) {
+        return reply.code(503).send({
+          error: "Diff summary unavailable: ANTHROPIC_API_KEY not set",
+          available: false,
+        });
       }
-    }
 
-    if (!diff || !diff.trim()) {
-      return { summary: null, empty: true };
-    }
+      const sessionId = lookupSessionIdImpl(req.params.sessionId);
+      const session = getSessionImpl.get({ $id: sessionId });
+      if (!session) return reply.code(404).send({ error: "Session not found" });
 
-    // Check cache
-    const hash = hashDiff(diff);
-    const cached = getCached(hash);
-    if (cached) {
-      return { summary: cached.summary, model: cached.model, cached: true };
-    }
+      const dir = session.worktree_dir || session.project_dir;
+      if (!dir || dir === "unknown") {
+        return reply.code(400).send({ error: "Session has no known working directory" });
+      }
+      if (!existsSyncImpl(dir)) {
+        return reply.code(400).send({ error: `Working directory no longer exists: ${dir}` });
+      }
 
-    // Build stat context via --shortstat (cheaper than full diff parse)
-    const stat = await buildStatFromShortstat(dir);
-
-    try {
-      const result = await summarizeDiff({ diff, stat, client: anthropic });
-
-      // Only cache non-empty summaries
-      if (result.summary) {
-        cache.set(hash, { summary: result.summary, model: result.model, timestamp: Date.now() });
-
-        // Cap cache size (LRU: evict oldest-inserted entry)
-        if (cache.size > 100) {
-          const oldest = cache.keys().next().value;
-          cache.delete(oldest);
+      // Get the current diff
+      let diff;
+      try {
+        diff = await runGitImpl(dir, ["diff", "HEAD", "--no-color", "--unified=3", "--submodule=diff"]);
+      } catch {
+        try {
+          diff = await runGitImpl(dir, ["diff", "--no-color", "--unified=3", "--submodule=diff"]);
+        } catch (e) {
+          return reply.code(500).send({ error: `Git error: ${e.message}` });
         }
       }
 
-      return { summary: result.summary, model: result.model, cached: false };
-    } catch (err) {
-      fastify.log.error(err, "Anthropic API error");
-      // Distinguish retriable errors from permanent failures
-      const status = err.status;
-      if (status === 429) {
-        const retryAfter = err.headers?.["retry-after"];
-        const headers = retryAfter ? { "Retry-After": retryAfter } : {};
-        return reply.code(429).headers(headers).send({ error: "Rate limited — try again later" });
+      if (!diff || !diff.trim()) {
+        return { summary: null, empty: true };
       }
-      if (status === 529) {
-        return reply.code(503).send({ error: "AI service overloaded — try again later" });
+
+      const hash = hashDiff(diff);
+      const cached = getCached(hash);
+      if (cached) {
+        return { summary: cached.summary, model: cached.model, cached: true };
       }
-      if (status === 401) {
-        return reply.code(502).send({ error: "API key configuration error" });
+
+      try {
+        let pending = inflight.get(hash);
+        if (!pending) {
+          pending = (async () => {
+            const stat = await buildStatFromShortstatImpl(dir);
+            const result = await summarizeDiffImpl({ diff, stat, client: anthropic });
+
+            if (result.summary) {
+              cache.set(hash, { summary: result.summary, model: result.model, timestamp: Date.now() });
+
+              if (cache.size > 100) {
+                const oldest = cache.keys().next().value;
+                cache.delete(oldest);
+              }
+            }
+
+            return { summary: result.summary, model: result.model };
+          })().finally(() => {
+            inflight.delete(hash);
+          });
+          inflight.set(hash, pending);
+        }
+
+        const result = await pending;
+        return { summary: result.summary, model: result.model, cached: false };
+      } catch (err) {
+        fastify.log.error(err, "Anthropic API error");
+        const status = err.status;
+        if (status === 429) {
+          const retryAfter = err.headers?.["retry-after"];
+          const headers = retryAfter ? { "Retry-After": retryAfter } : {};
+          return reply.code(429).headers(headers).send({ error: "Rate limited — try again later" });
+        }
+        if (status === 529) {
+          return reply.code(503).send({ error: "AI service overloaded — try again later" });
+        }
+        if (status === 401) {
+          return reply.code(502).send({ error: "API key configuration error" });
+        }
+        return reply.code(502).send({
+          error: `Summary generation failed: ${err.message}`,
+        });
       }
-      return reply.code(502).send({
-        error: `Summary generation failed: ${err.message}`,
-      });
-    }
-  });
+    });
+  };
 }
+
+export default createDiffSummaryRoutes();

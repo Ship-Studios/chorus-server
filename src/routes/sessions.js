@@ -2,6 +2,7 @@ import { broadcast, broadcastToSession } from "../broadcast.js";
 import {
   upsertSession,
   updateSessionStatus,
+  touchSessionActive,
   getSession,
   getAllSessions,
   resolveSessionId,
@@ -9,9 +10,23 @@ import {
   deleteSession,
   insertAlias,
 } from "../db.js";
-import { isPromptActive, cancelPrompt, getActiveSwarmAgents, hasActiveSwarmAgents, cancelSwarmAgent } from "../prompt.js";
+import { isPromptActive, cancelPrompt, getActiveSwarmAgents, cancelSwarmAgent } from "../prompt.js";
 import { startWatching, stopWatching } from "../git-watcher.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
+
+const SESSION_HEARTBEAT_INTERVAL_MS = 5_000;
+const sessionHeartbeatState = new Map();
+
+function didVisibleSessionChange(previousSession, nextSession) {
+  return (
+    !previousSession ||
+    previousSession.project_dir !== nextSession.project_dir ||
+    previousSession.worktree_dir !== nextSession.worktree_dir ||
+    previousSession.status !== nextSession.status ||
+    previousSession.model !== nextSession.model ||
+    previousSession.current_claude_session_id !== nextSession.current_claude_session_id
+  );
+}
 
 /**
  * Fastify plugin for session lifecycle routes.
@@ -47,8 +62,9 @@ export default async function sessionRoutes(fastify) {
       sessionId = await resolveSessionId(claudeSessionId, projectDir);
     }
 
+    const currentSession = getSession.get({ $id: sessionId });
     const isAliasedToExisting = sessionId !== claudeSessionId;
-    const existingSession = isAliasedToExisting ? getSession.get({ $id: sessionId }) : null;
+    const existingSession = isAliasedToExisting ? currentSession : null;
     const isWorktree =
       existingSession &&
       existingSession.project_dir !== projectDir &&
@@ -66,7 +82,7 @@ export default async function sessionRoutes(fastify) {
     // Don't overwrite current_claude_session_id when a prompt subprocess is running
     const hasActivePrompt = isPromptActive(sessionId);
 
-    upsertSession.run({
+    const upsertParams = {
       $id: sessionId,
       $projectDir: isWorktree ? existingSession.project_dir : projectDir,
       $worktreeDir: isWorktree
@@ -78,13 +94,54 @@ export default async function sessionRoutes(fastify) {
       $status: "active",
       $model: body.model || null,
       $currentClaudeSessionId: hasActivePrompt ? null : claudeSessionId,
-    });
+    };
+    const nextSession = {
+      project_dir: isWorktree
+        ? existingSession.project_dir
+        : (projectDir !== "unknown" && (currentSession?.project_dir === "unknown" || currentSession?.project_dir == null))
+          ? projectDir
+          : (currentSession?.project_dir ?? projectDir),
+      worktree_dir: isWorktree
+        ? projectDir
+        : shouldClearWorktree
+          ? null
+          : (body.worktreeDir !== undefined ? body.worktreeDir ?? null : currentSession?.worktree_dir ?? null),
+      status: "active",
+      model: body.model || currentSession?.model || null,
+      current_claude_session_id: hasActivePrompt
+        ? currentSession?.current_claude_session_id ?? null
+        : claudeSessionId,
+    };
+    const visibleChanged = didVisibleSessionChange(currentSession, nextSession);
+    const now = Date.now();
+    const heartbeatState = sessionHeartbeatState.get(sessionId);
+    const shouldPersistHeartbeat =
+      visibleChanged ||
+      !heartbeatState ||
+      now - heartbeatState.lastPersistedAt >= SESSION_HEARTBEAT_INTERVAL_MS;
+    let persistedHeartbeat = false;
 
-    invalidateDashboardSnapshot();
-    broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
+    if (visibleChanged) {
+      upsertSession.run(upsertParams);
+      invalidateDashboardSnapshot();
+      broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
+      persistedHeartbeat = true;
+    } else if (shouldPersistHeartbeat) {
+      const result = touchSessionActive.run({ $id: sessionId });
+      if (result.changes === 0) {
+        upsertSession.run(upsertParams);
+        invalidateDashboardSnapshot();
+        broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
+      }
+      persistedHeartbeat = true;
+    }
+
+    if (persistedHeartbeat) {
+      sessionHeartbeatState.set(sessionId, { lastPersistedAt: now });
+    }
 
     // Start watching .git for changes (deduplicates by directory)
-    const watchDir = isWorktree ? projectDir : (body.worktreeDir ?? projectDir);
+    const watchDir = nextSession.worktree_dir || nextSession.project_dir;
     startWatching(sessionId, watchDir);
 
     // Notify UI about the swarm agent → session linkage
@@ -126,6 +183,7 @@ export default async function sessionRoutes(fastify) {
         console.log(`Session ${sessionId} not found for stop, ignoring`);
       }
 
+      sessionHeartbeatState.delete(sessionId);
       invalidateDashboardSnapshot();
       broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
       return { ok: true };
@@ -168,6 +226,7 @@ export default async function sessionRoutes(fastify) {
       return reply.code(500).send({ error: "Failed to delete session" });
     }
 
+    sessionHeartbeatState.delete(sessionId);
     invalidateDashboardSnapshot();
     broadcast({ type: "session:deleted", sessionId });
     return { ok: true };

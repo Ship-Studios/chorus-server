@@ -1,7 +1,7 @@
 import { runGit } from "@agent-dashboard/diff-panel/server";
 import { parseWorktreeListPorcelain } from "./git-worktree.js";
 
-const CACHE_TTL_MS = 5_000;
+const CACHE_TTL_MS = 30_000;
 
 const cache = new Map();
 const inflight = new Map();

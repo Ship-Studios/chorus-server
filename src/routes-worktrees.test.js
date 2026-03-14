@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import { randomUUID } from "node:crypto";
 import Fastify from "fastify";
 import { Database } from "bun:sqlite";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -22,6 +23,10 @@ let app;
 let db;
 let stmts;
 let tempLinkedWorktree;
+
+function uniqueTempPath(prefix) {
+  return join(import.meta.dir, "..", `.${prefix}-${randomUUID().slice(0, 8)}`);
+}
 
 function git(args, opts = {}) {
   return execFileSync(GIT, args, {
@@ -244,6 +249,9 @@ function registerRoutes(fastify, s) {
 
 beforeAll(async () => {
   // Create a temp git repo
+  tempLinkedWorktree = uniqueTempPath("test-linked-worktree");
+  rmSync(TEMP_REPO, { recursive: true, force: true });
+  rmSync(tempLinkedWorktree, { recursive: true, force: true });
   mkdirSync(TEMP_REPO, { recursive: true });
   git(["init", "-b", "main"]);
   writeFileSync(join(TEMP_REPO, "app.js"), "const app = 1;\n");
@@ -257,7 +265,6 @@ beforeAll(async () => {
   git(["add", "."]);
   git(["commit", "-m", "add feature"]);
   git(["checkout", "main"]);
-  tempLinkedWorktree = join(import.meta.dir, "..", ".test-linked-worktree");
   git(["worktree", "add", tempLinkedWorktree, "agent/feature-abc123"]);
 
   // Set up DB and routes
@@ -436,7 +443,8 @@ describe("DELETE /api/worktrees/:worktreeId", () => {
     });
 
     git(["branch", "agent/delete-me", "main"]);
-    const linkedPath = join(import.meta.dir, "..", ".test-delete-worktree");
+    const linkedPath = uniqueTempPath("test-delete-worktree");
+    rmSync(linkedPath, { recursive: true, force: true });
     git(["worktree", "add", linkedPath, "agent/delete-me"]);
 
     try {

@@ -13,9 +13,11 @@ import {
   getSessionWorktrees,
   insertWorktree,
   lookupSessionId,
+  runInTransaction,
 } from "../../db.js";
 import { getDiscoveredWorktrees } from "../../worktree-discovery.js";
 import { invalidateDashboardSnapshot } from "../../dashboard-snapshot.js";
+import { runGit } from "../../run-git.js";
 
 /**
  * Fastify plugin for worktree listing routes.
@@ -40,23 +42,36 @@ export default async function worktreeListRoutes(fastify) {
       try {
         const discovered = await getDiscoveredWorktrees(session.project_dir);
         const knownBranches = new Set(worktrees.map((worktree) => worktree.branch_name));
-        let inserted = false;
+        const branchesToInsert = [];
         for (const { branch } of discovered) {
           if (!knownBranches.has(branch)) {
-            const description = branch.replace(/^agent\//, "").replace(/-[a-f0-9]{6}$/, "").replace(/-/g, " ");
-            insertWorktree.get({
-              $sessionId: sessionId,
-              $branchName: branch,
-              $baseBranch: "main",
-              $description: description,
-              $agentId: null,
-              $status: "pending",
-            });
+            branchesToInsert.push(branch);
             knownBranches.add(branch);
-            inserted = true;
           }
         }
-        if (inserted) {
+        if (branchesToInsert.length > 0) {
+          // Detect the current HEAD branch to use as the diff base. Falls back to
+          // "main" on detached HEAD or if git is unavailable.
+          let baseBranch = "main";
+          try {
+            const ref = await runGit(session.project_dir, ["symbolic-ref", "--short", "HEAD"]);
+            baseBranch = ref.trim() || "main";
+          } catch {
+            // detached HEAD or other git error — keep "main"
+          }
+          runInTransaction(() => {
+            for (const branch of branchesToInsert) {
+              const description = branch.replace(/^agent\//, "").replace(/-[a-f0-9]{6}$/, "").replace(/-/g, " ");
+              insertWorktree.get({
+                $sessionId: sessionId,
+                $branchName: branch,
+                $baseBranch: baseBranch,
+                $description: description,
+                $agentId: null,
+                $status: "pending",
+              });
+            }
+          });
           invalidateDashboardSnapshot();
           worktrees = getSessionWorktrees.all({ $sessionId: sessionId });
         }

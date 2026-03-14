@@ -34,7 +34,7 @@
 import { broadcast, broadcastToSession, debouncedDiffInvalidation } from "../broadcast.js";
 import {
   upsertSession,
-  insertEvent,
+  insertEventRow,
   getEvent,
   getSessionEvents,
   getRecentEvents,
@@ -43,13 +43,16 @@ import {
   resolveSessionId,
   lookupSessionId,
   updateSessionStatus,
+  touchSessionActive,
   getSession,
 } from "../db.js";
 import { isPromptActive } from "../prompt.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
 
 const MAX_PAYLOAD_STRING_CHARS = 50_000;
+const SESSION_SYNC_INTERVAL_MS = 5_000;
 const TRUNCATED_SUFFIX = "…[truncated]";
+const sessionSyncState = new Map();
 
 function truncateString(value) {
   if (typeof value !== "string" || value.length <= MAX_PAYLOAD_STRING_CHARS) {
@@ -72,6 +75,63 @@ function stringifyPayload(value) {
   });
 }
 
+function syncSessionActivity(sessionId, projectDir) {
+  const now = Date.now();
+  const normalizedProjectDir = projectDir || "unknown";
+  const previous = sessionSyncState.get(sessionId);
+  const shouldFullSync =
+    !previous ||
+    (normalizedProjectDir !== "unknown" && previous.projectDir !== normalizedProjectDir);
+  const shouldPersistActivity =
+    shouldFullSync ||
+    !previous ||
+    now - previous.lastPersistedAt >= SESSION_SYNC_INTERVAL_MS;
+
+  if (!shouldPersistActivity) {
+    return;
+  }
+
+  if (shouldFullSync) {
+    upsertSession.run({
+      $id: sessionId,
+      $projectDir: normalizedProjectDir,
+      $worktreeDir: null,
+      $gitRoot: null,
+      $status: "active",
+      $model: null,
+      $currentClaudeSessionId: null,
+    });
+    sessionSyncState.set(sessionId, {
+      lastPersistedAt: now,
+      projectDir: normalizedProjectDir !== "unknown" ? normalizedProjectDir : previous?.projectDir ?? "unknown",
+    });
+    return;
+  }
+
+  const result = touchSessionActive.run({ $id: sessionId });
+  if (result.changes === 0) {
+    upsertSession.run({
+      $id: sessionId,
+      $projectDir: normalizedProjectDir,
+      $worktreeDir: null,
+      $gitRoot: null,
+      $status: "active",
+      $model: null,
+      $currentClaudeSessionId: null,
+    });
+    sessionSyncState.set(sessionId, {
+      lastPersistedAt: now,
+      projectDir: normalizedProjectDir !== "unknown" ? normalizedProjectDir : previous?.projectDir ?? "unknown",
+    });
+    return;
+  }
+
+  sessionSyncState.set(sessionId, {
+    lastPersistedAt: now,
+    projectDir: previous?.projectDir ?? normalizedProjectDir,
+  });
+}
+
 /**
  * Fastify plugin for event and hook routes.
  *
@@ -89,18 +149,9 @@ export default async function eventRoutes(fastify) {
 
     const sessionId = await resolveSessionId(claudeSessionId, body.projectDir || "unknown");
 
-    // Auto-create session if it doesn't exist yet (race: PostToolUse before SessionStart)
-    upsertSession.run({
-      $id: sessionId,
-      $projectDir: body.projectDir || "unknown",
-      $worktreeDir: null,
-      $gitRoot: null,
-      $status: "active",
-      $model: null,
-      $currentClaudeSessionId: null,
-    });
+    syncSessionActivity(sessionId, body.projectDir || "unknown");
 
-    const { id: eventId } = insertEvent.get({
+    const eventId = insertEventRow({
       $sessionId: sessionId,
       $type: body.type ?? "tool_use",
       $toolName: body.toolName ?? null,
@@ -124,7 +175,13 @@ export default async function eventRoutes(fastify) {
     // Signal diff invalidation for file-modifying tools (only if tool succeeded)
     const isWriteOp = body.toolName === "Edit" || body.toolName === "Write" || body.toolName === "Bash" || body.toolName === "MultiEdit";
     if (isWriteOp && body.toolSuccess !== false) {
-      debouncedDiffInvalidation(sessionId);
+      let changedFiles = [];
+      if (body.toolName === "Edit" || body.toolName === "Write") {
+        changedFiles = [body.filePath].filter(Boolean);
+      } else if (body.toolName === "MultiEdit") {
+        changedFiles = (body.payload?.edits ?? []).map((e) => e.file_path).filter(Boolean);
+      }
+      debouncedDiffInvalidation(sessionId, changedFiles);
     }
 
     // Auto-detect Agent tool calls and create agent records
@@ -197,16 +254,7 @@ export default async function eventRoutes(fastify) {
     const toolInput = body.tool_input ?? {};
     const toolResponse = body.tool_response ?? {};
 
-    // Session heartbeat
-    upsertSession.run({
-      $id: sessionId,
-      $projectDir: projectDir,
-      $worktreeDir: null,
-      $gitRoot: null,
-      $status: "active",
-      $model: null,
-      $currentClaudeSessionId: null,
-    });
+    syncSessionActivity(sessionId, projectDir);
 
     // Generate summary (same priority as bash script)
     let summary;
@@ -220,7 +268,7 @@ export default async function eventRoutes(fastify) {
       summary = toolName || "unknown";
     }
 
-    const { id: eventId } = insertEvent.get({
+    const eventId = insertEventRow({
       $sessionId: sessionId,
       $type: "tool_use",
       $toolName: toolName ?? null,
@@ -240,7 +288,13 @@ export default async function eventRoutes(fastify) {
     // Diff invalidation for write-ops (PostToolUse only fires on success)
     const isWriteOp = toolName === "Edit" || toolName === "Write" || toolName === "Bash" || toolName === "MultiEdit";
     if (isWriteOp) {
-      debouncedDiffInvalidation(sessionId);
+      let changedFiles = [];
+      if (toolName === "Edit" || toolName === "Write") {
+        changedFiles = [toolInput.file_path || toolInput.path].filter(Boolean);
+      } else if (toolName === "MultiEdit") {
+        changedFiles = (toolInput.edits ?? []).map((e) => e.file_path).filter(Boolean);
+      }
+      debouncedDiffInvalidation(sessionId, changedFiles);
     }
 
     // Auto-detect Agent tool calls
@@ -274,7 +328,7 @@ export default async function eventRoutes(fastify) {
     const toolInput = body.tool_input ?? {};
     const error = body.error || "Tool failed";
 
-    const { id: eventId } = insertEvent.get({
+    const eventId = insertEventRow({
       $sessionId: sessionId,
       $type: "tool_error",
       $toolName: toolName ?? null,
@@ -307,6 +361,7 @@ export default async function eventRoutes(fastify) {
     try {
       updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
     } catch { /* session may not exist */ }
+    sessionSyncState.delete(sessionId);
     invalidateDashboardSnapshot();
     const session = getSession.get({ $id: sessionId });
     if (session) broadcast({ type: "session:updated", session });

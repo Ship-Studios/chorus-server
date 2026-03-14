@@ -1,4 +1,6 @@
 import { getIO } from "./socket.js";
+import { getSession } from "./db.js";
+import { invalidateDiffCache } from "./diff-cache.js";
 
 // --- Debounced diff invalidation ---
 // Multiple sources fire diff:invalidated for the same underlying change (hook,
@@ -6,18 +8,31 @@ import { getIO } from "./socket.js";
 // debounce so the UI receives at most one signal per burst.
 const diffTimers = new Map();
 
+function invalidateSessionDiffCache(sessionId) {
+  const session = sessionId ? getSession.get({ $id: sessionId }) : null;
+  const dir = session ? (session.worktree_dir || session.project_dir) : null;
+  invalidateDiffCache(dir || undefined);
+}
+
 /**
  * Coalesces multiple "diff:invalidated" signals into one per session with a debounce.
  *
  * @param {string} sessionId - The ID of the session to invalidate.
+ * @param {string[]} [changedFiles] - Optional list of changed file paths relative to repo root.
+ *   When provided, the UI can fetch only those files' diffs instead of the full diff.
+ *   Pass an empty array or omit to signal a full-diff refresh.
  */
-export function debouncedDiffInvalidation(sessionId) {
+export function debouncedDiffInvalidation(sessionId, changedFiles) {
   if (diffTimers.has(sessionId)) clearTimeout(diffTimers.get(sessionId));
   diffTimers.set(
     sessionId,
     setTimeout(() => {
       diffTimers.delete(sessionId);
-      broadcastToSession(sessionId, { type: "diff:invalidated", sessionId });
+      broadcastToSession(sessionId, {
+        type: "diff:invalidated",
+        sessionId,
+        changedFiles: changedFiles ?? [],
+      });
     }, 300),
   );
 }
@@ -38,6 +53,9 @@ export function clearDiffTimers() {
  * @param {object} message - The message object to broadcast.
  */
 export function broadcast(message) {
+  if (message?.type === "diff:invalidated") {
+    invalidateSessionDiffCache(message.sessionId);
+  }
   const io = getIO();
   if (!io) return;
   try {
@@ -55,6 +73,9 @@ export function broadcast(message) {
  * @param {object} message - The message object to broadcast.
  */
 export function broadcastToSession(sessionId, message) {
+  if (message?.type === "diff:invalidated") {
+    invalidateSessionDiffCache(sessionId || message.sessionId);
+  }
   const io = getIO();
   if (!io) return;
   try {

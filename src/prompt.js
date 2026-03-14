@@ -4,6 +4,11 @@ import { createStreamParser } from "./stream-parser.js";
 /** @type {Map<string, { controller: AbortController, proc: import("child_process").ChildProcess, claudeSessionId: string, done: boolean }>} */
 const activePrompts = new Map();
 
+function appendTail(buffer, chunk, maxLength) {
+  const combined = buffer + chunk;
+  return combined.length > maxLength ? combined.slice(-maxLength) : combined;
+}
+
 /**
  * Send a prompt to a Claude Code session via the CLI's --resume flag.
  * Streams structured JSON chunks back through the onChunk callback.
@@ -64,15 +69,16 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
 
     const parser = createStreamParser(onChunk);
     let stderrBuffer = "";
-    let stdoutRaw = "";
+    let stdoutTail = "";
     // Guard against double-firing onDone (e.g. cancel route + close event).
     // Each launchProcess call gets its own fresh flag.
     let doneFired = false;
 
     const MAX_STDERR = 4096;
+    const MAX_STDOUT_CONTEXT = 16_384;
 
     proc.stdout.on("data", (data) => {
-      stdoutRaw += data.toString();
+      stdoutTail = appendTail(stdoutTail, data.toString(), MAX_STDOUT_CONTEXT);
       parser.feed(data);
     });
 
@@ -90,7 +96,7 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
       // If --resume failed because the conversation no longer exists,
       // retry as a fresh prompt without --resume. Check both stderr and
       // stdout (the CLI may emit the error in either stream).
-      const allOutput = stderrBuffer + stdoutRaw;
+      const allOutput = stderrBuffer + stdoutTail;
       if (code !== 0 && resumeId && !didFallback && /no conversation found/i.test(allOutput)) {
         didFallback = true;
         console.log(`[prompt:${dashboardSessionId}] --resume failed (conversation not found), retrying as fresh prompt`);
