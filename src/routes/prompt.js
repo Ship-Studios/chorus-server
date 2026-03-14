@@ -28,7 +28,8 @@ import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { broadcastToSession, debouncedDiffInvalidation } from "../broadcast.js";
-import { getSession, lookupSessionId } from "../db.js";
+import { getSession } from "../db-adapter.js";
+import { lookupSessionId } from "../session-resolver.js";
 import { sendPrompt, cancelPrompt, isPromptActive } from "../prompt.js";
 
 const PROMPT_BODY_LIMIT = 15 * 1024 * 1024;
@@ -43,8 +44,8 @@ export default async function promptRoutes(fastify) {
     const { prompt, permissionMode, image } = req.body ?? {};
     if (!prompt) return reply.code(400).send({ error: "prompt is required" });
 
-    const sessionId = lookupSessionId(req.params.sessionId);
-    const session = getSession.get({ $id: sessionId });
+    const sessionId = await lookupSessionId(req.params.sessionId);
+    const session = await getSession(sessionId);
     if (!session) return reply.code(404).send({ error: "Session not found" });
 
     if (isPromptActive(sessionId)) {
@@ -103,7 +104,7 @@ export default async function promptRoutes(fastify) {
   });
 
   fastify.post("/api/sessions/:sessionId/prompt/cancel", async (req) => {
-    const sessionId = lookupSessionId(req.params.sessionId);
+    const sessionId = await lookupSessionId(req.params.sessionId);
     const cancelled = cancelPrompt(sessionId);
     // Do not broadcast prompt:done here — the process close/error handlers
     // are the single source of truth and will emit prompt:done with cancelled: true.
@@ -111,7 +112,7 @@ export default async function promptRoutes(fastify) {
   });
 
   fastify.get("/api/sessions/:sessionId/prompt/status", async (req) => {
-    const sessionId = lookupSessionId(req.params.sessionId);
+    const sessionId = await lookupSessionId(req.params.sessionId);
     return { active: isPromptActive(sessionId) };
   });
 }

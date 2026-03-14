@@ -36,8 +36,9 @@
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { getSession, lookupSessionId } from "../db.js";
-import { parseDiffToFiles, buildStatSummary, runGit } from "@agent-dashboard/diff-panel/server";
+import { getSession } from "../db-adapter.js";
+import { lookupSessionId } from "../session-resolver.js";
+import { parseDiffToFiles, buildStatSummary, runGit } from "@chorus/diff-panel/server";
 import {
   clearInflightDiff,
   getCachedDiff,
@@ -66,8 +67,8 @@ export function createDiffRoutes(deps = {}) {
 
   return async function diffRoutes(fastify) {
     fastify.get("/api/sessions/:sessionId/diff", async (req, reply) => {
-      const sessionId = lookupSessionIdImpl(req.params.sessionId);
-      const session = getSessionImpl.get({ $id: sessionId });
+      const sessionId = await lookupSessionIdImpl(req.params.sessionId);
+      const session = await getSessionImpl(sessionId);
       if (!session) return reply.code(404).send({ error: "Session not found" });
 
       const dir = session.worktree_dir || session.project_dir;

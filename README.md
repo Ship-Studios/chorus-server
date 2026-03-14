@@ -1,6 +1,6 @@
-# @agent-dashboard/server
+# @chorus/server
 
-Fastify 5 backend for the Agent Dashboard. Receives Claude Code hook events, persists them to SQLite, and broadcasts real-time updates to connected browser clients over Socket.IO.
+Fastify 5 backend for the Chorus dashboard. Receives Claude Code hook events, persists them to SQLite, and broadcasts real-time updates to connected browser clients over Socket.IO.
 
 ## Usage
 
@@ -8,7 +8,7 @@ Fastify 5 backend for the Agent Dashboard. Receives Claude Code hook events, per
 # Development (hot reload)
 bun --watch src/index.js
 
-# Production (started by bin/dashboard.js via `bun run start` / `pulse`)
+# Production (started by bin/dashboard.js via `bun run start` / `chorus`)
 bun src/index.js
 ```
 
@@ -21,7 +21,7 @@ Environment variables:
 | `ANTHROPIC_API_KEY` | — | Required for diff summary, commit message, and crafting synthesis endpoints |
 | `DASHBOARD_API_KEY` | — | Optional API key guard for non-GET `/api` requests |
 | `MAX_SWARM_AGENTS` | `10` | Concurrent swarm agent limit |
-| `PULSE_ROOT_DIR` | `~/Documents/code` | Root scanned for sidebar project list |
+| `CHORUS_ROOT_DIR` | `~/Documents/code` | Root scanned for sidebar project list (falls back to `PULSE_ROOT_DIR`) |
 | `FORCE_VPN_MODE` | — | Skip VPN detection, assume on-VPN |
 | `FORCE_OFF_VPN` | — | Skip VPN detection, assume off-VPN |
 
@@ -127,4 +127,4 @@ routes/             -- one Fastify plugin per feature area
 
 The database lives at `packages/server/dashboard.db` (created on first run). Seven tables: `sessions`, `events`, `session_aliases`, `agents`, `worktrees`, `craft_agents`, `craft_recipes`. WAL mode, foreign keys enforced, all parameters use `$name` binding syntax.
 
-Diff parsing and git utilities are shared from `@agent-dashboard/diff-panel` (workspace package). Re-export bridges in `git.js`, `run-git.js`, `diff.js`, and `summarize-diff.js` keep route import paths stable.
+Diff parsing and git utilities are shared from `@chorus/diff-panel` (workspace package). Re-export bridges in `git.js`, `run-git.js`, `diff.js`, and `summarize-diff.js` keep route import paths stable.

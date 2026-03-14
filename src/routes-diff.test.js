@@ -8,10 +8,14 @@ import { GIT } from "./git.js";
 import { parseDiffToFiles } from "./diff.js";
 import { runGit } from "./run-git.js";
 
+const SKIP = !process.env.SUPABASE_DB_URL;
+
 /**
  * Integration tests for the diff route.
  * Uses a temporary git repository with real commits and unstaged changes.
  */
+
+describe.skipIf(SKIP)("diff routes", () => {
 
 const TEMP_REPO = join(import.meta.dir, "..", ".test-diff-repo");
 const TEMP_WORKTREE = join(import.meta.dir, "..", ".test-diff-worktree");
@@ -55,7 +59,8 @@ function initDb() {
 }
 
 beforeAll(async () => {
-  // Create a temp git repo with a commit
+  // Ensure a clean state in case a previous run left the repo behind
+  rmSync(TEMP_REPO, { recursive: true, force: true });
   mkdirSync(TEMP_REPO, { recursive: true });
 
   const git = (args) =>
@@ -167,10 +172,14 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app?.close();
-  execFileSync(GIT, ["worktree", "remove", "--force", TEMP_WORKTREE], {
-    cwd: TEMP_REPO,
-    stdio: "pipe",
-  });
+  try {
+    execFileSync(GIT, ["worktree", "remove", "--force", TEMP_WORKTREE], {
+      cwd: TEMP_REPO,
+      stdio: "pipe",
+    });
+  } catch {
+    // Worktree may have already been removed on a previous run
+  }
   rmSync(TEMP_REPO, { recursive: true, force: true });
   rmSync(TEMP_WORKTREE, { recursive: true, force: true });
 });
@@ -302,3 +311,5 @@ describe("worktree_dir contamination prevention", () => {
     expect(res.json().directory).toBe(TEMP_REPO);
   });
 });
+
+}); // describe.skipIf(SKIP)

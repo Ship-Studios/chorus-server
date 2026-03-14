@@ -27,8 +27,9 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
-import { getSession, lookupSessionId } from "../db.js";
-import { runGit, buildStatFromShortstat, summarizeDiff } from "@agent-dashboard/diff-panel/server";
+import { getSession } from "../db-adapter.js";
+import { lookupSessionId } from "../session-resolver.js";
+import { runGit, buildStatFromShortstat, summarizeDiff } from "@chorus/diff-panel/server";
 import { getAnthropicFetchOptions } from "../vpn.js";
 import { handleAnthropicError } from "../anthropic-error.js";
 
@@ -173,7 +174,7 @@ export function createDiffSummaryRoutes(deps = {}) {
      * `inflight` map — only one Anthropic API call is made regardless of how
      * many requests arrive while the first is in-flight.
      */
-    fastify.post("/api/sessions/:sessionId/diff/summary", async (req, reply) => {
+    fastify.post("/api/sessions/:sessionId/diff/summary", { config: { rateLimit: { max: 10, timeWindow: 60_000 } } }, async (req, reply) => {
       const anthropic = getClientImpl();
       if (!anthropic) {
         return reply.code(503).send({
@@ -182,8 +183,8 @@ export function createDiffSummaryRoutes(deps = {}) {
         });
       }
 
-      const sessionId = lookupSessionIdImpl(req.params.sessionId);
-      const session = getSessionImpl.get({ $id: sessionId });
+      const sessionId = await lookupSessionIdImpl(req.params.sessionId);
+      const session = await getSessionImpl(sessionId);
       if (!session) return reply.code(404).send({ error: "Session not found" });
 
       const dir = session.worktree_dir || session.project_dir;

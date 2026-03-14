@@ -9,10 +9,14 @@ import { parseDiffToFiles, buildStatSummary } from "./diff.js";
 import { runGit } from "./run-git.js";
 import { createHash } from "node:crypto";
 
+const SKIP = !process.env.SUPABASE_DB_URL;
+
 /**
  * Tests for the diff summary route.
  * Tests the endpoint logic with a real git repo and mocked Anthropic SDK.
  */
+
+describe.skipIf(SKIP)("diff summary routes", () => {
 
 const TEMP_REPO = join(import.meta.dir, "..", ".test-diff-summary-repo");
 const TEMP_WORKTREE = join(import.meta.dir, "..", ".test-diff-summary-worktree");
@@ -540,3 +544,5 @@ describe("diff truncation", () => {
     }
   });
 });
+
+}); // describe.skipIf(SKIP)

@@ -1,5 +1,5 @@
 import { getIO } from "./socket.js";
-import { getSession } from "./db.js";
+import { getSession } from "./db-adapter.js";
 import { invalidateDiffCache } from "./diff-cache.js";
 
 // --- Debounced diff invalidation ---
@@ -8,8 +8,8 @@ import { invalidateDiffCache } from "./diff-cache.js";
 // debounce so the UI receives at most one signal per burst.
 const diffTimers = new Map();
 
-function invalidateSessionDiffCache(sessionId) {
-  const session = sessionId ? getSession.get({ $id: sessionId }) : null;
+async function invalidateSessionDiffCache(sessionId) {
+  const session = sessionId ? await getSession(sessionId) : null;
   const dir = session ? (session.worktree_dir || session.project_dir) : null;
   invalidateDiffCache(dir || undefined);
 }
@@ -54,7 +54,7 @@ export function clearDiffTimers() {
  */
 export function broadcast(message) {
   if (message?.type === "diff:invalidated") {
-    invalidateSessionDiffCache(message.sessionId);
+    invalidateSessionDiffCache(message.sessionId).catch(() => {});
   }
   const io = getIO();
   if (!io) return;
@@ -74,7 +74,7 @@ export function broadcast(message) {
  */
 export function broadcastToSession(sessionId, message) {
   if (message?.type === "diff:invalidated") {
-    invalidateSessionDiffCache(sessionId || message.sessionId);
+    invalidateSessionDiffCache(sessionId || message.sessionId).catch(() => {});
   }
   const io = getIO();
   if (!io) return;

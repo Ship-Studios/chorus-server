@@ -39,12 +39,11 @@ Fastify 5 server — plain JS (ESM, no build step), `bun:sqlite` for persistence
 | `git-worktree.js` | `createWorktree()`, `removeWorktree()` (3-attempt retry + 1.5s delay), `deleteBranch()`, `getBranchDiffStats()`, `detectConflicts()` via `git merge-tree --write-tree`, `getCurrentBranch()`, `slugify()`, `parseWorktreeListPorcelain()`. |
 | `stream-parser.js` | `createStreamParser(onChunk)` — line-buffered JSON parser for `claude --output-format stream-json`. Returns `{ feed(data), flush() }`. 512KB safety valve; non-JSON lines emitted as `{ type: "raw", text }`. |
 | `git-watcher.js` | chokidar-based git dir watchers. `startWatching(sessionId, dir)` — deduplicates by dir, watches `.git/HEAD`, `.git/index`, `.git/refs/heads`, `.git/refs/stash` with 300ms debounce, calls `debouncedDiffInvalidation`. `stopWatching()`, `initWatchers(sessions)` (called at startup), `shutdownWatchers()`. |
-| `architecture.js` | `scanArchitecture()` — async dir walker (max 400 files, depth 8), import-graph parser (ES/CJS/Python/Go), directory tree builder with palette coloring and single-child collapse. `getArchitecture()` wraps with 30s in-memory cache. |
 | `vpn.js` | VPN detection + env configuration. `configureVpn()` — startup curl probe to internal endpoint, sets `HTTP_PROXY`/`HTTPS_PROXY`/`NODE_EXTRA_CA_CERTS`/`NO_PROXY`. `reconfigureVpn()` — live re-detection. `getAnthropicFetchOptions()` — Bun-compatible proxy/TLS options for Anthropic SDK. `vpnState` singleton. Supports `FORCE_VPN_MODE`, `FORCE_OFF_VPN`, `VPN_DETECTION_TIMEOUT`, `WALMART_CERT_PATH`. |
-| `git.js` | Re-export bridge: `GIT` binary path from `@agent-dashboard/diff-panel/server`. |
-| `run-git.js` | Re-export bridge: `runGit` from `@agent-dashboard/diff-panel/server`. |
-| `diff.js` | Re-export bridge: `parseDiffToFiles`, `buildStatSummary` from `@agent-dashboard/diff-panel/server`. |
-| `summarize-diff.js` | Re-export bridge: `summarizeDiff`, `truncateDiff`, `buildUserPrompt`, `SYSTEM_PROMPT`, `DEFAULT_MODEL`, `MAX_DIFF_CHARS` from `@agent-dashboard/diff-panel/server`. |
+| `git.js` | Re-export bridge: `GIT` binary path from `@chorus/diff-panel/server`. |
+| `run-git.js` | Re-export bridge: `runGit` from `@chorus/diff-panel/server`. |
+| `diff.js` | Re-export bridge: `parseDiffToFiles`, `buildStatSummary` from `@chorus/diff-panel/server`. |
+| `summarize-diff.js` | Re-export bridge: `summarizeDiff`, `truncateDiff`, `buildUserPrompt`, `SYSTEM_PROMPT`, `DEFAULT_MODEL`, `MAX_DIFF_CHARS` from `@chorus/diff-panel/server`. |
 
 ## Route Files
 
@@ -63,17 +62,16 @@ Each exports a default async Fastify plugin registered in `index.js`. Some also 
 | `routes/worktrees/list.js` | `GET /api/sessions/:id/worktrees` (auto-discovers unregistered branches via `git worktree list --porcelain`) |
 | `routes/worktrees/diff.js` | `GET /api/worktrees/:id/diff` (three-dot diff, `maxFiles` query param, default 200), `GET /api/worktrees/:id/files` |
 | `routes/worktrees/mutations.js` | `POST /api/worktrees/:id/merge`, `DELETE /api/worktrees/:id`, `POST /api/worktrees/:id/check-conflicts` |
-| `routes/architecture.js` | `GET /api/sessions/:id/architecture` |
 | `routes/crafting.js` | `GET/POST /api/craft/agents`, `PUT/DELETE /api/craft/agents/:id`, `GET/POST /api/craft/recipes`, `PUT/DELETE /api/craft/recipes/:id`, `POST /api/craft/synthesize`, `GET /api/craft/ai-status`. Exports `resetClient()`. |
-| `routes/directories.js` | `GET /api/directories` — lists `~/Documents/code` (or `PULSE_ROOT_DIR`) for sidebar navigation |
+| `routes/directories.js` | `GET /api/directories` — lists `~/Documents/code` (or `CHORUS_ROOT_DIR`, falling back to `PULSE_ROOT_DIR`) for sidebar navigation |
 
 ## Testing Approach
 
-21 test files, `bun:test`. Run with `bun test src`.
+19 test files, `bun:test`. Run with `bun test src`.
 
 - **`api.test.js`** — Integration tests. Builds a minimal Fastify app in-process with an in-memory SQLite DB (schema inlined, does NOT import `db.js` to avoid touching `dashboard.db`). Uses `app.inject()` for HTTP.
-- **`routes-*.test.js`** (8 files) — Per-route integration tests: `routes-architecture.test.js`, `routes-commit.test.js`, `routes-crafting.test.js`, `routes-diff-summary.test.js`, `routes-diff.test.js`, `routes-prompt.test.js`, `routes-swarm.test.js`, `routes-worktrees.test.js`.
-- **Unit tests** (12 files) — `db.test.js`, `session-resolver.test.js`, `session-resolver-submodule.test.js`, `broadcast.test.js`, `diff.test.js`, `git.test.js`, `run-git.test.js`, `prompt.test.js`, `git-worktree.test.js`, `stream-parser.test.js`, `summarize-diff.test.js`, `architecture.test.js`.
+- **`routes-*.test.js`** (7 files) — Per-route integration tests: `routes-commit.test.js`, `routes-crafting.test.js`, `routes-diff-summary.test.js`, `routes-diff.test.js`, `routes-prompt.test.js`, `routes-swarm.test.js`, `routes-worktrees.test.js`.
+- **Unit tests** (11 files) — `db.test.js`, `session-resolver.test.js`, `session-resolver-submodule.test.js`, `broadcast.test.js`, `diff.test.js`, `git.test.js`, `run-git.test.js`, `prompt.test.js`, `git-worktree.test.js`, `stream-parser.test.js`, `summarize-diff.test.js`.
 - **`src/evals/diff-summary.eval.js`** — Calls real Anthropic API. Not run by `bun test`. Execute with `ANTHROPIC_API_KEY=sk-... bun run eval:diff-summary`.
 
 ### Broadcast test pattern

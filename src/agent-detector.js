@@ -1,19 +1,19 @@
-import { insertAgent } from "./db.js";
+import { insertAgent } from "./db-adapter.js";
 
-export function detectAndInsertAgent(sessionId, eventId, toolInput, broadcast) {
+export async function detectAndInsertAgent(sessionId, eventId, toolInput, broadcast) {
   if (!toolInput) return null;
 
   const description = toolInput.description || toolInput.prompt?.slice(0, 120) || "Sub-agent";
   const agentType = toolInput.subagent_type || "general-purpose";
   const prompt = toolInput.prompt || null;
 
-  const { id: agentId } = insertAgent.get({
-    $sessionId: sessionId,
-    $eventId: eventId,
-    $description: description,
-    $agentType: agentType,
-    $prompt: prompt ? prompt.slice(0, 2000) : null,
-    $status: "completed",
+  const { id: agentId } = await insertAgent({
+    sessionId,
+    eventId,
+    description,
+    agentType,
+    prompt: prompt ? prompt.slice(0, 2000) : null,
+    status: "completed",
   });
 
   const agent = {

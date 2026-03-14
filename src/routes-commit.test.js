@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { GIT } from "./git.js";
 import { runGit as actualRunGit } from "./run-git.js";
 
+const SKIP = !process.env.SUPABASE_DB_URL;
+
 const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
 const originalModel = process.env.DIFF_SUMMARY_MODEL;
 
@@ -21,13 +23,26 @@ let anthropicError = null;
 let apps = [];
 let tempRoots = [];
 
-mock.module("./db.js", () => ({
-  getSession: {
-    get({ $id }) {
-      return sessions.get($id) ?? null;
-    },
+mock.module("./db-adapter.js", () => ({
+  async getSession(id) {
+    return sessions.get(id) ?? null;
   },
-  lookupSessionId(id) {
+  async getAlias() { return null; },
+  async insertAlias() {},
+  async findActiveSessionByDir() { return null; },
+  async findRecentSessionByDir() { return null; },
+  async findActiveSessionByGitRoot() { return null; },
+  async findRecentSessionByGitRoot() { return null; },
+  async updateSessionGitRoot() {},
+  async upsertSession() {},
+  async runInTransaction(fn) { return fn({}); },
+}));
+
+mock.module("./session-resolver.js", () => ({
+  async lookupSessionId(id) {
+    return sessionAliases.get(id) ?? id;
+  },
+  async resolveSessionId(id) {
     return sessionAliases.get(id) ?? id;
   },
 }));
@@ -139,6 +154,8 @@ async function createInjectedApp(deps = {}) {
   apps.push(app);
   return app;
 }
+
+describe.skipIf(SKIP)("commit routes", () => {
 
 beforeEach(() => {
   sessions.clear();
@@ -599,3 +616,5 @@ describe("POST /api/sessions/:sessionId/commit", () => {
     expect(anthropicConstructCalls).toHaveLength(2);
   });
 });
+
+}); // describe.skipIf(SKIP)

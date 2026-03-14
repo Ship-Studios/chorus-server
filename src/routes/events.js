@@ -38,11 +38,10 @@ import {
   getSessionEvents,
   getRecentEventsSlim,
   getSessionAgents,
-  resolveSessionId,
-  lookupSessionId,
   updateSessionStatus,
   getSession,
-} from "../db.js";
+} from "../db-adapter.js";
+import { resolveSessionId, lookupSessionId } from "../session-resolver.js";
 import { isPromptActive } from "../prompt.js";
 import { stopWatching } from "../git-watcher.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
@@ -93,13 +92,13 @@ export default async function eventRoutes(fastify) {
 
     syncSessionActivity(sessionId, body.projectDir || "unknown");
 
-    const eventId = insertEventRow({
-      $sessionId: sessionId,
-      $type: body.type ?? "tool_use",
-      $toolName: body.toolName ?? null,
-      $filePath: body.filePath ?? null,
-      $summary: body.summary ?? null,
-      $payload: body.payload ? stringifyPayload(body.payload) : null,
+    const eventId = await insertEventRow({
+      sessionId,
+      type: body.type ?? "tool_use",
+      toolName: body.toolName ?? null,
+      filePath: body.filePath ?? null,
+      summary: body.summary ?? null,
+      payload: body.payload ? stringifyPayload(body.payload) : null,
     });
     const event = {
       id: eventId,
@@ -128,7 +127,7 @@ export default async function eventRoutes(fastify) {
 
     // Auto-detect Agent tool calls and create agent records
     if (body.toolName === "Agent" && body.payload) {
-      detectAndInsertAgent(sessionId, eventId, body.payload.input ?? {}, broadcast);
+      await detectAndInsertAgent(sessionId, eventId, body.payload.input ?? {}, broadcast);
     }
 
     invalidateDashboardSnapshot();
@@ -141,7 +140,7 @@ export default async function eventRoutes(fastify) {
     const body = req.body ?? {};
     const rawId = body.sessionId || body.session_id;
     if (!rawId) return reply.code(400).send({ error: "sessionId required" });
-    const sessionId = lookupSessionId(rawId) || rawId;
+    const sessionId = (await lookupSessionId(rawId)) || rawId;
     const toolName = body.toolName || body.tool_name;
     broadcastToSession(sessionId, { type: "diff:pending", sessionId, toolName });
     return { ok: true };
@@ -153,7 +152,7 @@ export default async function eventRoutes(fastify) {
     const rawId = body.session_id;
     const toolName = body.tool_name;
     if (!rawId) return reply.code(200).send();
-    const sessionId = lookupSessionId(rawId) || rawId;
+    const sessionId = (await lookupSessionId(rawId)) || rawId;
     broadcastToSession(sessionId, { type: "diff:pending", sessionId, toolName });
     return reply.code(200).send();
   });
@@ -185,13 +184,13 @@ export default async function eventRoutes(fastify) {
       summary = toolName || "unknown";
     }
 
-    const eventId = insertEventRow({
-      $sessionId: sessionId,
-      $type: "tool_use",
-      $toolName: toolName ?? null,
-      $filePath: toolInput.file_path || toolInput.path || null,
-      $summary: summary,
-      $payload: stringifyPayload({ input: toolInput, response: toolResponse }),
+    const eventId = await insertEventRow({
+      sessionId,
+      type: "tool_use",
+      toolName: toolName ?? null,
+      filePath: toolInput.file_path || toolInput.path || null,
+      summary,
+      payload: stringifyPayload({ input: toolInput, response: toolResponse }),
     });
 
     const event = {
@@ -216,7 +215,7 @@ export default async function eventRoutes(fastify) {
 
     // Auto-detect Agent tool calls
     if (toolName === "Agent") {
-      detectAndInsertAgent(sessionId, eventId, toolInput, broadcast);
+      await detectAndInsertAgent(sessionId, eventId, toolInput, broadcast);
     }
 
     invalidateDashboardSnapshot();
@@ -235,13 +234,13 @@ export default async function eventRoutes(fastify) {
     const toolInput = body.tool_input ?? {};
     const error = body.error || "Tool failed";
 
-    const eventId = insertEventRow({
-      $sessionId: sessionId,
-      $type: "tool_error",
-      $toolName: toolName ?? null,
-      $filePath: toolInput.file_path || toolInput.path || null,
-      $summary: `${toolName} failed: ${error.slice(0, 120)}`,
-      $payload: stringifyPayload({ error, input: toolInput }),
+    const eventId = await insertEventRow({
+      sessionId,
+      type: "tool_error",
+      toolName: toolName ?? null,
+      filePath: toolInput.file_path || toolInput.path || null,
+      summary: `${toolName} failed: ${error.slice(0, 120)}`,
+      payload: stringifyPayload({ error, input: toolInput }),
     });
 
     invalidateDashboardSnapshot();
@@ -263,34 +262,34 @@ export default async function eventRoutes(fastify) {
     const body = req.body ?? {};
     const rawId = body.session_id;
     if (!rawId) return reply.code(200).send();
-    const sessionId = lookupSessionId(rawId) || rawId;
+    const sessionId = (await lookupSessionId(rawId)) || rawId;
     if (isPromptActive(sessionId)) return reply.code(200).send();
-    const session = getSession.get({ $id: sessionId });
+    const session = await getSession(sessionId);
     try {
-      updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
+      await updateSessionStatus(sessionId, "stopped");
     } catch { /* session may not exist */ }
     stopWatching(sessionId, session?.worktree_dir || session?.project_dir);
     clearSessionSyncState(sessionId);
     invalidateDashboardSnapshot();
-    if (session) broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
+    if (session) broadcast({ type: "session:updated", session: await getSession(sessionId) });
     return reply.code(200).send();
   });
 
   fastify.get("/api/sessions/:sessionId/events", async (req) => {
-    const sessionId = lookupSessionId(req.params.sessionId);
-    return getSessionEvents.all({ $sessionId: sessionId });
+    const sessionId = await lookupSessionId(req.params.sessionId);
+    return getSessionEvents(sessionId);
   });
 
   fastify.get("/api/events/:eventId", async (req, reply) => {
-    const event = getEvent.get({ $id: Number(req.params.eventId) });
+    const event = await getEvent(Number(req.params.eventId));
     if (!event) return reply.code(404).send({ error: "Event not found" });
     return event;
   });
 
-  fastify.get("/api/events", async () => getRecentEventsSlim.all());
+  fastify.get("/api/events", async () => getRecentEventsSlim());
 
   fastify.get("/api/sessions/:sessionId/agents", async (req) => {
-    const sessionId = lookupSessionId(req.params.sessionId);
-    return getSessionAgents.all({ $sessionId: sessionId });
+    const sessionId = await lookupSessionId(req.params.sessionId);
+    return getSessionAgents(sessionId);
   });
 }

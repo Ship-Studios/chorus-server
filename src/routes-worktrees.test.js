@@ -9,6 +9,8 @@ import { GIT } from "./git.js";
 import { parseDiffToFiles } from "./diff.js";
 import { runGit } from "./run-git.js";
 
+const SKIP = !process.env.SUPABASE_DB_URL;
+
 /**
  * Integration tests for worktree route handlers.
  * Uses a temporary git repository with branches to test:
@@ -17,6 +19,8 @@ import { runGit } from "./run-git.js";
  * - file listing
  * - conflict detection
  */
+
+describe.skipIf(SKIP)("worktree routes", () => {
 
 const TEMP_REPO = join(import.meta.dir, "..", ".test-worktree-repo");
 let app;
@@ -460,3 +464,5 @@ describe("DELETE /api/worktrees/:worktreeId", () => {
     }
   });
 });
+
+}); // describe.skipIf(SKIP)

@@ -56,14 +56,8 @@ beforeEach(async () => {
     getAnthropicFetchOptions() {
       return {};
     },
-    getSession: {
-      get({ $id }) {
-        return sessions.get($id) ?? null;
-      },
-    },
-    lookupSessionId(sessionId) {
-      return sessionId;
-    },
+    getSession: async (id) => sessions.get(id) ?? null,
+    lookupSessionId: async (sessionId) => sessionId,
     async runGit() {
       runGitCalls += 1;
       return DIFF;

@@ -12,9 +12,8 @@ import {
   getSession,
   getSessionWorktrees,
   insertWorktree,
-  lookupSessionId,
-  runInTransaction,
-} from "../../db.js";
+} from "../../db-adapter.js";
+import { lookupSessionId } from "../../session-resolver.js";
 import { getDiscoveredWorktrees } from "../../worktree-discovery.js";
 import { invalidateDashboardSnapshot } from "../../dashboard-snapshot.js";
 import { runGit } from "../../run-git.js";
@@ -34,9 +33,9 @@ export default async function worktreeListRoutes(fastify) {
    * @param {import("fastify").FastifyRequest} req - Fastify request
    */
   fastify.get("/api/sessions/:sessionId/worktrees", async (req) => {
-    const sessionId = lookupSessionId(req.params.sessionId);
-    const session = getSession.get({ $id: sessionId });
-    let worktrees = getSessionWorktrees.all({ $sessionId: sessionId });
+    const sessionId = await lookupSessionId(req.params.sessionId);
+    const session = await getSession(sessionId);
+    let worktrees = await getSessionWorktrees(sessionId);
 
     if (session?.project_dir && existsSync(session.project_dir)) {
       try {
@@ -59,21 +58,19 @@ export default async function worktreeListRoutes(fastify) {
           } catch {
             // detached HEAD or other git error — keep "main"
           }
-          runInTransaction(() => {
-            for (const branch of branchesToInsert) {
-              const description = branch.replace(/^agent\//, "").replace(/-[a-f0-9]{6}$/, "").replace(/-/g, " ");
-              insertWorktree.get({
-                $sessionId: sessionId,
-                $branchName: branch,
-                $baseBranch: baseBranch,
-                $description: description,
-                $agentId: null,
-                $status: "pending",
-              });
-            }
-          });
+          for (const branch of branchesToInsert) {
+            const description = branch.replace(/^agent\//, "").replace(/-[a-f0-9]{6}$/, "").replace(/-/g, " ");
+            await insertWorktree({
+              sessionId,
+              branchName: branch,
+              baseBranch,
+              description,
+              agentId: null,
+              status: "pending",
+            });
+          }
           invalidateDashboardSnapshot();
-          worktrees = getSessionWorktrees.all({ $sessionId: sessionId });
+          worktrees = await getSessionWorktrees(sessionId);
         }
       } catch {
         // git unavailable or not a git repo — skip discovery

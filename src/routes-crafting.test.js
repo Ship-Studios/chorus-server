@@ -2,11 +2,15 @@ import { describe, expect, it, beforeAll, afterAll } from "bun:test";
 import Fastify from "fastify";
 import { Database } from "bun:sqlite";
 
+const SKIP = !process.env.SUPABASE_DB_URL;
+
 /**
  * Integration tests for crafting route handlers.
  * Uses an in-memory SQLite database that mirrors the craft_agents and
  * craft_recipes tables from db.js.
  */
+
+describe.skipIf(SKIP)("crafting routes", () => {
 
 let app;
 let db;
@@ -618,4 +622,6 @@ describe("crafting workflow", () => {
     const recipeNames = recipes.json().map((r) => r.name);
     expect(recipeNames).toContain("Writer + Reviewer v2");
   });
-});
+
+}); // crafting workflow
+}); // describe.skipIf(SKIP)

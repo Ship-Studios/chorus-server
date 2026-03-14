@@ -3,6 +3,8 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { Database } from "bun:sqlite";
 
+const SKIP = !process.env.SUPABASE_DB_URL;
+
 /**
  * Integration tests for the server API.
  * Uses an in-memory SQLite database and builds a minimal Fastify app
@@ -416,7 +418,7 @@ function buildApp(testDb) {
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
-describe("API integration tests", () => {
+describe.skipIf(SKIP)("API integration tests", () => {
   let app;
   let testDb;
   let worktreeHelpers;

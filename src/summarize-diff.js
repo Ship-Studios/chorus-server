@@ -1,5 +1,5 @@
 /**
- * Re-exports from @agent-dashboard/diff-panel.
+ * Re-exports from @chorus/diff-panel.
  * Canonical source lives in packages/diff-panel/src/server/summarize-diff.js.
  */
 export {
@@ -10,4 +10,4 @@ export {
   MAX_SUMMARY_CHARS,
   DEFAULT_MODEL,
   SYSTEM_PROMPT,
-} from "@agent-dashboard/diff-panel/server";
+} from "@chorus/diff-panel/server";

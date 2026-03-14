@@ -3,7 +3,9 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = resolve(__dirname, "..", "dashboard.db");
+const DB_PATH = process.env.DASHBOARD_DB_PATH
+  ? resolve(process.env.DASHBOARD_DB_PATH)
+  : resolve(__dirname, "..", "dashboard.db");
 
 const db = new Database(DB_PATH, { create: true });
 
@@ -533,6 +535,59 @@ export function deduplicateSessions() {
     console.log(`[dedup] Merged ${remove.length} duplicate session(s) for ${project_dir} → ${keep}`);
   }
   return dupes.length;
+}
+
+// ---------------------------------------------------------------------------
+// Orphan reconciliation
+// ---------------------------------------------------------------------------
+
+const markStaleSessions = db.prepare(`
+  UPDATE sessions SET status = 'stopped'
+  WHERE status = 'active' AND last_seen_at < datetime('now', '-30 minutes')
+  RETURNING id
+`);
+
+/**
+ * Mark active sessions as stopped if they haven't been seen in 30 minutes.
+ * Runs at startup to clean up sessions orphaned by a server crash.
+ *
+ * @returns {number} Number of sessions marked as stopped.
+ */
+export function reconcileOrphanedSessions() {
+  const rows = markStaleSessions.all();
+  return rows.length;
+}
+
+// ---------------------------------------------------------------------------
+// Data retention / cleanup
+// ---------------------------------------------------------------------------
+
+const RETENTION_DAYS = Number(process.env.DATA_RETENTION_DAYS) || 30;
+
+const deleteOldEvents = db.prepare(`
+  DELETE FROM events WHERE created_at < datetime('now', $days || ' days')
+`);
+
+const deleteOldStoppedSessions = db.prepare(`
+  DELETE FROM sessions WHERE status = 'stopped' AND last_seen_at < datetime('now', $days || ' days')
+`);
+
+/**
+ * Prune old data to prevent unbounded database growth.
+ * Deletes events and stopped sessions older than DATA_RETENTION_DAYS (default 30).
+ * Runs a WAL checkpoint after cleanup to reclaim disk space.
+ *
+ * @returns {{ eventsDeleted: number, sessionsDeleted: number }}
+ */
+export function pruneOldData() {
+  const days = `-${RETENTION_DAYS}`;
+  const eventsResult = deleteOldEvents.run({ $days: days });
+  const sessionsResult = deleteOldStoppedSessions.run({ $days: days });
+  db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  return {
+    eventsDeleted: eventsResult.changes,
+    sessionsDeleted: sessionsResult.changes,
+  };
 }
 
 export default db;

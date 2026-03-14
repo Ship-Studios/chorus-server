@@ -1,4 +1,4 @@
-import { touchSessionActive, upsertSession } from "./db.js";
+import { touchSessionActive, upsertSession } from "./db-adapter.js";
 
 const SESSION_SYNC_INTERVAL_MS = 5_000;
 const sessionSyncState = new Map();
@@ -7,7 +7,7 @@ export function clearSessionSyncState(sessionId) {
   sessionSyncState.delete(sessionId);
 }
 
-export function syncSessionActivity(sessionId, projectDir) {
+export async function syncSessionActivity(sessionId, projectDir) {
   const now = Date.now();
   const normalizedProjectDir = projectDir || "unknown";
   const previous = sessionSyncState.get(sessionId);
@@ -24,14 +24,14 @@ export function syncSessionActivity(sessionId, projectDir) {
   }
 
   if (shouldFullSync) {
-    upsertSession.run({
-      $id: sessionId,
-      $projectDir: normalizedProjectDir,
-      $worktreeDir: null,
-      $gitRoot: null,
-      $status: "active",
-      $model: null,
-      $currentClaudeSessionId: null,
+    await upsertSession({
+      id: sessionId,
+      projectDir: normalizedProjectDir,
+      worktreeDir: null,
+      gitRoot: null,
+      status: "active",
+      model: null,
+      currentClaudeSessionId: null,
     });
     sessionSyncState.set(sessionId, {
       lastPersistedAt: now,
@@ -40,16 +40,16 @@ export function syncSessionActivity(sessionId, projectDir) {
     return;
   }
 
-  const result = touchSessionActive.run({ $id: sessionId });
+  const result = await touchSessionActive(sessionId);
   if (result.changes === 0) {
-    upsertSession.run({
-      $id: sessionId,
-      $projectDir: normalizedProjectDir,
-      $worktreeDir: null,
-      $gitRoot: null,
-      $status: "active",
-      $model: null,
-      $currentClaudeSessionId: null,
+    await upsertSession({
+      id: sessionId,
+      projectDir: normalizedProjectDir,
+      worktreeDir: null,
+      gitRoot: null,
+      status: "active",
+      model: null,
+      currentClaudeSessionId: null,
     });
     sessionSyncState.set(sessionId, {
       lastPersistedAt: now,

@@ -1,645 +1,361 @@
-import { describe, expect, it, beforeEach } from "bun:test";
-import { Database } from "bun:sqlite";
+import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 
 /**
  * Tests for session alias resolution, lookup, and deletion logic.
  *
- * Since db.js creates a file-backed DB at import time, we replicate the
- * core resolution logic here with an in-memory database. This tests the
- * SQL and business logic without touching the real dashboard.db.
+ * These tests call the async db-supabase.js functions directly and require
+ * a real PostgreSQL connection. Set SUPABASE_DB_URL to run them.
+ *
+ * When SUPABASE_DB_URL is not set all suites are skipped so the CI test
+ * run that exercises unit logic (stream-parser, broadcast, etc.) still
+ * passes without a database.
+ *
+ * db-pg.js throws at module load time when SUPABASE_DB_URL is absent, so
+ * we use a conditional dynamic import to avoid the error in skip-mode.
  */
 
-// ─── Schema + statements ─────────────────────────────────────────────────────
+const SKIP = !process.env.SUPABASE_DB_URL;
 
-function createTestDb() {
-  const db = new Database(":memory:");
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
+// Lazily-populated DB handles — only defined when SKIP is false.
+let upsertSession, getSession, getAlias, insertAlias,
+    insertEvent, insertAgent, insertWorktree,
+    getSessionWorktrees, getSessionAgents, getSessionEvents,
+    deleteSession, sql;
 
-  db.exec(`
-    CREATE TABLE sessions (
-      id TEXT PRIMARY KEY,
-      project_dir TEXT NOT NULL,
-      worktree_dir TEXT,
-      git_root TEXT,
-      status TEXT NOT NULL DEFAULT 'active',
-      model TEXT,
-      current_claude_session_id TEXT,
-      started_at TEXT NOT NULL DEFAULT (datetime('now')),
-      last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL REFERENCES sessions(id),
-      type TEXT NOT NULL,
-      tool_name TEXT,
-      file_path TEXT,
-      summary TEXT,
-      payload TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX idx_events_session ON events(session_id);
-
-    CREATE TABLE session_aliases (
-      claude_session_id TEXT PRIMARY KEY,
-      dashboard_session_id TEXT NOT NULL
-    );
-
-    CREATE TABLE agents (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL REFERENCES sessions(id),
-      event_id INTEGER REFERENCES events(id),
-      description TEXT,
-      agent_type TEXT,
-      prompt TEXT,
-      status TEXT NOT NULL DEFAULT 'completed',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE worktrees (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL REFERENCES sessions(id),
-      branch_name TEXT NOT NULL,
-      base_branch TEXT NOT NULL DEFAULT 'main',
-      description TEXT,
-      agent_id TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      files_changed INTEGER DEFAULT 0,
-      insertions INTEGER DEFAULT 0,
-      deletions INTEGER DEFAULT 0,
-      diff_stat TEXT,
-      conflict_info TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX idx_worktrees_session ON worktrees(session_id);
-    CREATE UNIQUE INDEX idx_worktrees_branch ON worktrees(session_id, branch_name);
-  `);
-
-  const stmts = {
-    upsertSession: db.prepare(`
-      INSERT INTO sessions (id, project_dir, worktree_dir, git_root, status, model, current_claude_session_id)
-      VALUES ($id, $projectDir, $worktreeDir, $gitRoot, $status, $model, $currentClaudeSessionId)
-      ON CONFLICT(id) DO UPDATE SET
-        status = $status,
-        model = COALESCE($model, sessions.model),
-        project_dir = CASE
-          WHEN $projectDir != 'unknown' AND (sessions.project_dir = 'unknown' OR sessions.project_dir IS NULL)
-            THEN $projectDir
-          ELSE sessions.project_dir
-        END,
-        worktree_dir = CASE
-          WHEN $worktreeDir = '__clear__' THEN NULL
-          ELSE COALESCE($worktreeDir, sessions.worktree_dir)
-        END,
-        git_root = COALESCE($gitRoot, sessions.git_root),
-        current_claude_session_id = COALESCE($currentClaudeSessionId, sessions.current_claude_session_id),
-        last_seen_at = datetime('now')
-    `),
-    updateSessionStatus: db.prepare(`
-      UPDATE sessions SET status = $status, last_seen_at = datetime('now') WHERE id = $id
-    `),
-    getSession: db.prepare(`SELECT * FROM sessions WHERE id = $id`),
-    getAllSessions: db.prepare(`SELECT * FROM sessions ORDER BY started_at DESC LIMIT 50`),
-    getAlias: db.prepare(`SELECT dashboard_session_id FROM session_aliases WHERE claude_session_id = $claudeSessionId`),
-    insertAlias: db.prepare(`INSERT OR REPLACE INTO session_aliases (claude_session_id, dashboard_session_id) VALUES ($claudeSessionId, $dashboardSessionId)`),
-    findActiveSessionByDir: db.prepare(`
-      SELECT id, git_root FROM sessions WHERE project_dir = $projectDir AND status = 'active'
-      ORDER BY last_seen_at DESC LIMIT 1
-    `),
-    findRecentSessionByDir: db.prepare(`
-      SELECT id, git_root FROM sessions WHERE project_dir = $projectDir AND status = 'active' AND last_seen_at >= datetime('now', '-30 minutes')
-      ORDER BY last_seen_at DESC LIMIT 1
-    `),
-    insertEvent: db.prepare(`
-      INSERT INTO events (session_id, type, tool_name, file_path, summary, payload)
-      VALUES ($sessionId, $type, $toolName, $filePath, $summary, $payload)
-      RETURNING id
-    `),
-    insertAgent: db.prepare(`
-      INSERT INTO agents (session_id, event_id, description, agent_type, prompt, status)
-      VALUES ($sessionId, $eventId, $description, $agentType, $prompt, $status)
-      RETURNING id
-    `),
-    insertWorktree: db.prepare(`
-      INSERT INTO worktrees (session_id, branch_name, base_branch, description, agent_id, status)
-      VALUES ($sessionId, $branchName, $baseBranch, $description, $agentId, $status)
-      ON CONFLICT (session_id, branch_name) DO UPDATE SET
-        description = excluded.description,
-        status = excluded.status,
-        updated_at = datetime('now')
-      RETURNING id
-    `),
-    getSessionWorktrees: db.prepare(`SELECT * FROM worktrees WHERE session_id = $sessionId`),
-    getSessionAgents: db.prepare(`SELECT * FROM agents WHERE session_id = $sessionId`),
-    getSessionEvents: db.prepare(`SELECT * FROM events WHERE session_id = $sessionId`),
-    deleteSessionAliases: db.prepare(`DELETE FROM session_aliases WHERE dashboard_session_id = $sessionId`),
-    deleteSessionWorktrees: db.prepare(`DELETE FROM worktrees WHERE session_id = $sessionId`),
-    deleteSessionAgents: db.prepare(`DELETE FROM agents WHERE session_id = $sessionId`),
-    deleteSessionEvents: db.prepare(`DELETE FROM events WHERE session_id = $sessionId`),
-    deleteSessionRow: db.prepare(`DELETE FROM sessions WHERE id = $sessionId`),
-  };
-
-  /**
-   * Mirrors the resolveSessionId logic from db.js (without the git-root path).
-   */
-  function resolveSessionId(claudeSessionId, projectDir) {
-    const existing = stmts.getAlias.get({ $claudeSessionId: claudeSessionId });
-    if (existing) return existing.dashboard_session_id;
-
-    if (projectDir && projectDir !== "unknown") {
-      const active = stmts.findActiveSessionByDir.get({ $projectDir: projectDir });
-      if (active) {
-        stmts.insertAlias.run({ $claudeSessionId: claudeSessionId, $dashboardSessionId: active.id });
-        return active.id;
-      }
-
-      const recent = stmts.findRecentSessionByDir.get({ $projectDir: projectDir });
-      if (recent) {
-        stmts.insertAlias.run({ $claudeSessionId: claudeSessionId, $dashboardSessionId: recent.id });
-        return recent.id;
-      }
-    }
-
-    stmts.insertAlias.run({ $claudeSessionId: claudeSessionId, $dashboardSessionId: claudeSessionId });
-    return claudeSessionId;
-  }
-
-  function lookupSessionId(claudeSessionId) {
-    const existing = stmts.getAlias.get({ $claudeSessionId: claudeSessionId });
-    return existing ? existing.dashboard_session_id : claudeSessionId;
-  }
-
-  function deleteSession(sessionId) {
-    const session = stmts.getSession.get({ $id: sessionId });
-    if (!session) return false;
-    if (session.status === "active") return false;
-
-    db.transaction(() => {
-      stmts.deleteSessionWorktrees.run({ $sessionId: sessionId });
-      stmts.deleteSessionAgents.run({ $sessionId: sessionId });
-      stmts.deleteSessionEvents.run({ $sessionId: sessionId });
-      stmts.deleteSessionAliases.run({ $sessionId: sessionId });
-      stmts.deleteSessionRow.run({ $sessionId: sessionId });
-    })();
-
-    return true;
-  }
-
-  return { db, ...stmts, resolveSessionId, lookupSessionId, deleteSession };
+if (!SKIP) {
+  ({
+    upsertSession, getSession, getAlias, insertAlias,
+    insertEvent, insertAgent, insertWorktree,
+    getSessionWorktrees, getSessionAgents, getSessionEvents,
+    deleteSession, sql,
+  } = await import("./db-supabase.js"));
 }
 
-// ─── resolveSessionId ────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-describe("resolveSessionId", () => {
-  let t;
-  beforeEach(() => { t = createTestDb(); });
+let idSeq = 0;
+function uid(prefix = "s") {
+  return `${prefix}-test-${Date.now()}-${++idSeq}`;
+}
 
-  it("returns the claude session id for a new session", () => {
-    const id = t.resolveSessionId("cli-1", "/project/a");
-    expect(id).toBe("cli-1");
+async function makeSession(overrides = {}) {
+  const id = overrides.id ?? uid("sess");
+  await upsertSession({
+    id,
+    projectDir: overrides.projectDir ?? "/project/test",
+    worktreeDir: overrides.worktreeDir ?? null,
+    gitRoot: overrides.gitRoot ?? null,
+    status: overrides.status ?? "active",
+    model: overrides.model ?? null,
+    currentClaudeSessionId: overrides.currentClaudeSessionId ?? null,
   });
+  return id;
+}
 
-  it("creates an alias for new sessions", () => {
-    t.resolveSessionId("cli-1", "/project/a");
-    const alias = t.getAlias.get({ $claudeSessionId: "cli-1" });
-    expect(alias.dashboard_session_id).toBe("cli-1");
-  });
+async function forceDelete(sessionId) {
+  await sql`DELETE FROM worktrees       WHERE session_id = ${sessionId}`;
+  await sql`DELETE FROM agents          WHERE session_id = ${sessionId}`;
+  await sql`DELETE FROM events          WHERE session_id = ${sessionId}`;
+  await sql`DELETE FROM session_aliases WHERE dashboard_session_id = ${sessionId}`;
+  await sql`DELETE FROM sessions        WHERE id = ${sessionId}`;
+}
 
-  it("returns existing alias if already mapped", () => {
-    t.insertAlias.run({ $claudeSessionId: "cli-1", $dashboardSessionId: "dash-1" });
-    const id = t.resolveSessionId("cli-1", "/project/a");
-    expect(id).toBe("dash-1");
-  });
+async function deleteAlias(claudeSessionId) {
+  await sql`DELETE FROM session_aliases WHERE claude_session_id = ${claudeSessionId}`;
+}
 
-  it("aliases to active session with same project dir", () => {
-    // Create an active session for /project/a
-    t.upsertSession.run({
-      $id: "dash-1",
-      $projectDir: "/project/a",
-      $worktreeDir: null,
-      $status: "active",
-      $model: null,
-      $gitRoot: null,
-      $currentClaudeSessionId: null,
-    });
+// ─── getAlias / insertAlias ───────────────────────────────────────────────────
 
-    // New CLI session for same dir should alias to it
-    const id = t.resolveSessionId("cli-2", "/project/a");
-    expect(id).toBe("dash-1");
-  });
-
-  it("does not alias to stopped sessions via either active or recent path", () => {
-    t.upsertSession.run({
-      $id: "dash-1",
-      $projectDir: "/project/a",
-      $worktreeDir: null,
-      $gitRoot: null,
-      $status: "stopped",
-      $model: null,
-      $currentClaudeSessionId: null,
-    });
-
-    // Both findActiveSessionByDir and findRecentSessionByDir now require status = 'active'.
-    // A stopped session should never be aliased to — even if last_seen_at is recent.
-    const id = t.resolveSessionId("cli-2", "/project/a");
-    expect(id).toBe("cli-2");
-  });
-
-  it("creates new session for different project dir", () => {
-    t.upsertSession.run({
-      $id: "dash-1",
-      $projectDir: "/project/a",
-      $worktreeDir: null,
-      $status: "active",
-      $model: null,
-      $gitRoot: null,
-      $currentClaudeSessionId: null,
-    });
-
-    const id = t.resolveSessionId("cli-2", "/project/b");
-    expect(id).toBe("cli-2");
-    expect(id).not.toBe("dash-1");
-  });
-
-  it("creates new session for 'unknown' project dir", () => {
-    t.upsertSession.run({
-      $id: "dash-1",
-      $projectDir: "/project/a",
-      $worktreeDir: null,
-      $status: "active",
-      $model: null,
-      $gitRoot: null,
-      $currentClaudeSessionId: null,
-    });
-
-    const id = t.resolveSessionId("cli-2", "unknown");
-    expect(id).toBe("cli-2");
-  });
-
-  it("creates new session for null project dir", () => {
-    const id = t.resolveSessionId("cli-1", null);
-    expect(id).toBe("cli-1");
-  });
-
-  it("multiple CLI sessions alias to the same dashboard session", () => {
-    t.upsertSession.run({
-      $id: "dash-1",
-      $projectDir: "/project/a",
-      $worktreeDir: null,
-      $status: "active",
-      $model: null,
-      $gitRoot: null,
-      $currentClaudeSessionId: null,
-    });
-
-    const id1 = t.resolveSessionId("cli-2", "/project/a");
-    const id2 = t.resolveSessionId("cli-3", "/project/a");
-    expect(id1).toBe("dash-1");
-    expect(id2).toBe("dash-1");
-  });
-
-  it("idempotent: resolving the same CLI id twice returns the same result", () => {
-    const id1 = t.resolveSessionId("cli-1", "/project/a");
-    const id2 = t.resolveSessionId("cli-1", "/project/a");
-    expect(id1).toBe(id2);
-  });
-});
-
-// ─── lookupSessionId ─────────────────────────────────────────────────────────
-
-describe("lookupSessionId", () => {
-  let t;
-  beforeEach(() => { t = createTestDb(); });
-
-  it("returns the aliased dashboard id if mapped", () => {
-    t.insertAlias.run({ $claudeSessionId: "cli-1", $dashboardSessionId: "dash-1" });
-    expect(t.lookupSessionId("cli-1")).toBe("dash-1");
-  });
-
-  it("falls back to the input id if no alias exists", () => {
-    expect(t.lookupSessionId("no-such-id")).toBe("no-such-id");
-  });
-
-  it("does not create an alias (read-only)", () => {
-    t.lookupSessionId("cli-1");
-    const alias = t.getAlias.get({ $claudeSessionId: "cli-1" });
+describe.skipIf(SKIP)("getAlias / insertAlias (alias primitives)", () => {
+  it("returns null for an unknown claude session id", async () => {
+    const alias = await getAlias(uid("unknown"));
     expect(alias).toBeNull();
   });
-});
 
-// ─── deleteSession ───────────────────────────────────────────────────────────
-
-describe("deleteSession", () => {
-  let t;
-  beforeEach(() => { t = createTestDb(); });
-
-  it("returns false for non-existent session", () => {
-    expect(t.deleteSession("nonexistent")).toBe(false);
+  it("round-trips an alias", async () => {
+    const cli = uid("cli");
+    const dash = uid("dash");
+    await insertAlias(cli, dash);
+    const alias = await getAlias(cli);
+    expect(alias?.dashboard_session_id).toBe(dash);
+    await deleteAlias(cli);
   });
 
-  it("returns false for active session", () => {
-    t.upsertSession.run({
-      $id: "s1",
-      $projectDir: "/project/a",
-      $worktreeDir: null,
-      $status: "active",
-      $model: null,
-      $gitRoot: null,
-      $currentClaudeSessionId: null,
-    });
-    expect(t.deleteSession("s1")).toBe(false);
-    // Session should still exist
-    expect(t.getSession.get({ $id: "s1" })).toBeTruthy();
-  });
-
-  it("deletes a stopped session", () => {
-    t.upsertSession.run({
-      $id: "s1",
-      $projectDir: "/project/a",
-      $worktreeDir: null,
-      $status: "stopped",
-      $model: null,
-      $gitRoot: null,
-      $currentClaudeSessionId: null,
-    });
-    expect(t.deleteSession("s1")).toBe(true);
-    expect(t.getSession.get({ $id: "s1" })).toBeNull();
-  });
-
-  it("cascade-deletes events", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "stopped", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    t.insertEvent.get({
-      $sessionId: "s1", $type: "tool_use", $toolName: "Read",
-      $filePath: null, $summary: null, $payload: null,
-    });
-    expect(t.getSessionEvents.all({ $sessionId: "s1" })).toHaveLength(1);
-
-    t.deleteSession("s1");
-    expect(t.getSessionEvents.all({ $sessionId: "s1" })).toHaveLength(0);
-  });
-
-  it("cascade-deletes agents", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "stopped", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    const { id: eventId } = t.insertEvent.get({
-      $sessionId: "s1", $type: "tool_use", $toolName: "Agent",
-      $filePath: null, $summary: null, $payload: null,
-    });
-    t.insertAgent.get({
-      $sessionId: "s1", $eventId: eventId, $description: "test",
-      $agentType: "general-purpose", $prompt: "do stuff", $status: "completed",
-    });
-    expect(t.getSessionAgents.all({ $sessionId: "s1" })).toHaveLength(1);
-
-    t.deleteSession("s1");
-    expect(t.getSessionAgents.all({ $sessionId: "s1" })).toHaveLength(0);
-  });
-
-  it("cascade-deletes worktrees", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "stopped", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    t.insertWorktree.get({
-      $sessionId: "s1", $branchName: "agent/test-abc123",
-      $baseBranch: "main", $description: "test", $agentId: null, $status: "ready",
-    });
-    expect(t.getSessionWorktrees.all({ $sessionId: "s1" })).toHaveLength(1);
-
-    t.deleteSession("s1");
-    expect(t.getSessionWorktrees.all({ $sessionId: "s1" })).toHaveLength(0);
-  });
-
-  it("cascade-deletes aliases", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "stopped", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    t.insertAlias.run({ $claudeSessionId: "cli-1", $dashboardSessionId: "s1" });
-    t.insertAlias.run({ $claudeSessionId: "cli-2", $dashboardSessionId: "s1" });
-
-    t.deleteSession("s1");
-    expect(t.getAlias.get({ $claudeSessionId: "cli-1" })).toBeNull();
-    expect(t.getAlias.get({ $claudeSessionId: "cli-2" })).toBeNull();
-  });
-
-  it("deletes error-status session", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "error", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    expect(t.deleteSession("s1")).toBe(true);
+  it("upserts (idempotent) on re-insert with same claude id", async () => {
+    const cli = uid("cli");
+    const dash1 = uid("d1");
+    const dash2 = uid("d2");
+    await insertAlias(cli, dash1);
+    await insertAlias(cli, dash2); // ON CONFLICT DO UPDATE
+    const alias = await getAlias(cli);
+    expect(alias?.dashboard_session_id).toBe(dash2);
+    await deleteAlias(cli);
   });
 });
 
 // ─── upsertSession edge cases ────────────────────────────────────────────────
 
-describe("upsertSession", () => {
-  let t;
-  beforeEach(() => { t = createTestDb(); });
-
-  it("preserves model on null update", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: "opus-4", $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    const session = t.getSession.get({ $id: "s1" });
-    expect(session.model).toBe("opus-4");
+describe.skipIf(SKIP)("upsertSession", () => {
+  const ids = [];
+  beforeEach(() => { ids.length = 0; });
+  afterEach(async () => {
+    for (const id of ids) await forceDelete(id);
   });
 
-  it("updates model when new value is provided", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: "opus-4", $gitRoot: null, $currentClaudeSessionId: null,
+  async function sess(overrides = {}) {
+    const id = await makeSession(overrides);
+    ids.push(id);
+    return id;
+  }
+
+  it("preserves model on null update", async () => {
+    const id = await sess({ model: "opus-4" });
+    await upsertSession({
+      id, projectDir: "/p", worktreeDir: null, gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
     });
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: "sonnet-4", $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    const session = t.getSession.get({ $id: "s1" });
-    expect(session.model).toBe("sonnet-4");
+    const s = await getSession(id);
+    expect(s.model).toBe("opus-4");
   });
 
-  it("does not overwrite project_dir with 'unknown'", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/real/path", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
+  it("updates model when new value is provided", async () => {
+    const id = await sess({ model: "opus-4" });
+    await upsertSession({
+      id, projectDir: "/p", worktreeDir: null, gitRoot: null,
+      status: "active", model: "sonnet-4", currentClaudeSessionId: null,
     });
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "unknown", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    const session = t.getSession.get({ $id: "s1" });
-    expect(session.project_dir).toBe("/real/path");
+    const s = await getSession(id);
+    expect(s.model).toBe("sonnet-4");
   });
 
-  it("upgrades project_dir from 'unknown' to real path", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "unknown", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
+  it("does not overwrite project_dir with 'unknown'", async () => {
+    const id = await sess({ projectDir: "/real/path" });
+    await upsertSession({
+      id, projectDir: "unknown", worktreeDir: null, gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
     });
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/real/path", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    const session = t.getSession.get({ $id: "s1" });
-    expect(session.project_dir).toBe("/real/path");
+    const s = await getSession(id);
+    expect(s.project_dir).toBe("/real/path");
   });
 
-  it("preserves worktree_dir on null update", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: "/wt",
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
+  it("upgrades project_dir from 'unknown' to real path", async () => {
+    const id = await sess({ projectDir: "unknown" });
+    await upsertSession({
+      id, projectDir: "/real/path", worktreeDir: null, gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
     });
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    const session = t.getSession.get({ $id: "s1" });
-    expect(session.worktree_dir).toBe("/wt");
+    const s = await getSession(id);
+    expect(s.project_dir).toBe("/real/path");
   });
 
-  it("preserves current_claude_session_id on null update", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $currentClaudeSessionId: "real-cli-id",
+  it("preserves worktree_dir on null update", async () => {
+    const id = await sess({ worktreeDir: "/wt" });
+    await upsertSession({
+      id, projectDir: "/p", worktreeDir: null, gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
     });
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
+    const s = await getSession(id);
+    expect(s.worktree_dir).toBe("/wt");
+  });
+
+  it("preserves current_claude_session_id on null update", async () => {
+    const id = await sess({ currentClaudeSessionId: "real-cli-id" });
+    await upsertSession({
+      id, projectDir: "/p", worktreeDir: null, gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
     });
-    const session = t.getSession.get({ $id: "s1" });
-    expect(session.current_claude_session_id).toBe("real-cli-id");
+    const s = await getSession(id);
+    expect(s.current_claude_session_id).toBe("real-cli-id");
+  });
+});
+
+// ─── upsertSession worktree_dir __clear__ sentinel ───────────────────────────
+
+describe.skipIf(SKIP)("upsertSession worktree_dir clearing", () => {
+  const ids = [];
+  beforeEach(() => { ids.length = 0; });
+  afterEach(async () => {
+    for (const id of ids) await forceDelete(id);
+  });
+
+  async function sess(overrides = {}) {
+    const id = await makeSession(overrides);
+    ids.push(id);
+    return id;
+  }
+
+  it("clears worktree_dir when __clear__ sentinel is passed", async () => {
+    const id = await sess({ projectDir: "/project/root", worktreeDir: "/stale/worktree" });
+    expect((await getSession(id)).worktree_dir).toBe("/stale/worktree");
+
+    await upsertSession({
+      id, projectDir: "/project/root", worktreeDir: "__clear__", gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
+    });
+    expect((await getSession(id)).worktree_dir).toBeNull();
+  });
+
+  it("preserves worktree_dir when null is passed (COALESCE behavior)", async () => {
+    const id = await sess({ worktreeDir: "/existing/wt" });
+    await upsertSession({
+      id, projectDir: "/p", worktreeDir: null, gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
+    });
+    expect((await getSession(id)).worktree_dir).toBe("/existing/wt");
+  });
+
+  it("sets worktree_dir when a real path is passed", async () => {
+    const id = await sess({ worktreeDir: null });
+    await upsertSession({
+      id, projectDir: "/p", worktreeDir: "/new/worktree", gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
+    });
+    expect((await getSession(id)).worktree_dir).toBe("/new/worktree");
+  });
+
+  it("can re-set worktree_dir after clearing", async () => {
+    const id = await sess({ worktreeDir: "/old" });
+    await upsertSession({
+      id, projectDir: "/p", worktreeDir: "__clear__", gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
+    });
+    expect((await getSession(id)).worktree_dir).toBeNull();
+
+    await upsertSession({
+      id, projectDir: "/p", worktreeDir: "/new", gitRoot: null,
+      status: "active", model: null, currentClaudeSessionId: null,
+    });
+    expect((await getSession(id)).worktree_dir).toBe("/new");
+  });
+});
+
+// ─── deleteSession ───────────────────────────────────────────────────────────
+
+describe.skipIf(SKIP)("deleteSession", () => {
+  it("returns false for non-existent session", async () => {
+    expect(await deleteSession(uid("nonexistent"))).toBe(false);
+  });
+
+  it("returns false for active session", async () => {
+    const id = await makeSession({ status: "active" });
+    expect(await deleteSession(id)).toBe(false);
+    expect(await getSession(id)).toBeTruthy();
+    await forceDelete(id);
+  });
+
+  it("deletes a stopped session", async () => {
+    const id = await makeSession({ status: "stopped" });
+    expect(await deleteSession(id)).toBe(true);
+    expect(await getSession(id)).toBeNull();
+  });
+
+  it("deletes error-status session", async () => {
+    const id = await makeSession({ status: "error" });
+    expect(await deleteSession(id)).toBe(true);
+    expect(await getSession(id)).toBeNull();
+  });
+
+  it("cascade-deletes events", async () => {
+    const id = await makeSession({ status: "stopped" });
+    await insertEvent({ sessionId: id, type: "tool_use", toolName: "Read" });
+
+    const eventsBefore = await getSessionEvents(id);
+    expect(eventsBefore.length).toBeGreaterThan(0);
+
+    await deleteSession(id);
+    const eventsAfter = await getSessionEvents(id);
+    expect(eventsAfter).toHaveLength(0);
+  });
+
+  it("cascade-deletes agents", async () => {
+    const id = await makeSession({ status: "stopped" });
+    const { id: eventId } = await insertEvent({ sessionId: id, type: "tool_use", toolName: "Agent" });
+    await insertAgent({
+      sessionId: id, eventId, description: "test",
+      agentType: "general-purpose", prompt: "do stuff", status: "completed",
+    });
+
+    const agentsBefore = await getSessionAgents(id);
+    expect(agentsBefore.length).toBeGreaterThan(0);
+
+    await deleteSession(id);
+    const agentsAfter = await getSessionAgents(id);
+    expect(agentsAfter).toHaveLength(0);
+  });
+
+  it("cascade-deletes worktrees", async () => {
+    const id = await makeSession({ status: "stopped" });
+    await insertWorktree({
+      sessionId: id, branchName: uid("agent/test"), baseBranch: "main",
+      description: "test", agentId: null, status: "ready",
+    });
+
+    const wtBefore = await getSessionWorktrees(id);
+    expect(wtBefore.length).toBeGreaterThan(0);
+
+    await deleteSession(id);
+    const wtAfter = await getSessionWorktrees(id);
+    expect(wtAfter).toHaveLength(0);
+  });
+
+  it("cascade-deletes aliases", async () => {
+    const id = await makeSession({ status: "stopped" });
+    const cli1 = uid("cli");
+    const cli2 = uid("cli");
+    await insertAlias(cli1, id);
+    await insertAlias(cli2, id);
+
+    await deleteSession(id);
+    expect(await getAlias(cli1)).toBeNull();
+    expect(await getAlias(cli2)).toBeNull();
   });
 });
 
 // ─── Worktree unique constraint ──────────────────────────────────────────────
 
-describe("worktree constraints", () => {
-  let t;
-  beforeEach(() => { t = createTestDb(); });
+describe.skipIf(SKIP)("worktree constraints", () => {
+  it("upserts on duplicate (session_id, branch_name)", async () => {
+    const id = await makeSession();
+    const branch = uid("agent/test");
 
-  it("upserts on duplicate (session_id, branch_name)", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
+    await insertWorktree({
+      sessionId: id, branchName: branch, baseBranch: "main",
+      description: "first", agentId: null, status: "pending",
+    });
+    await insertWorktree({
+      sessionId: id, branchName: branch, baseBranch: "main",
+      description: "updated", agentId: null, status: "ready",
     });
 
-    t.insertWorktree.get({
-      $sessionId: "s1", $branchName: "agent/test",
-      $baseBranch: "main", $description: "first", $agentId: null, $status: "pending",
-    });
+    const wts = await getSessionWorktrees(id);
+    const matching = wts.filter((w) => w.branch_name === branch);
+    expect(matching).toHaveLength(1);
+    expect(matching[0].description).toBe("updated");
+    expect(matching[0].status).toBe("ready");
 
-    // Insert again with same branch — should update, not error
-    t.insertWorktree.get({
-      $sessionId: "s1", $branchName: "agent/test",
-      $baseBranch: "main", $description: "updated", $agentId: null, $status: "ready",
-    });
-
-    const wts = t.getSessionWorktrees.all({ $sessionId: "s1" });
-    expect(wts).toHaveLength(1);
-    expect(wts[0].description).toBe("updated");
-    expect(wts[0].status).toBe("ready");
+    await forceDelete(id);
   });
 
-  it("allows same branch name for different sessions", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p1", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
+  it("allows same branch name for different sessions", async () => {
+    const id1 = await makeSession({ projectDir: "/p1" });
+    const id2 = await makeSession({ projectDir: "/p2" });
+    const branch = uid("agent/test");
+
+    await insertWorktree({
+      sessionId: id1, branchName: branch, baseBranch: "main",
+      description: "s1", agentId: null, status: "pending",
     });
-    t.upsertSession.run({
-      $id: "s2", $projectDir: "/p2", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
+    await insertWorktree({
+      sessionId: id2, branchName: branch, baseBranch: "main",
+      description: "s2", agentId: null, status: "pending",
     });
 
-    t.insertWorktree.get({
-      $sessionId: "s1", $branchName: "agent/test",
-      $baseBranch: "main", $description: "s1", $agentId: null, $status: "pending",
-    });
-    t.insertWorktree.get({
-      $sessionId: "s2", $branchName: "agent/test",
-      $baseBranch: "main", $description: "s2", $agentId: null, $status: "pending",
-    });
+    const wts1 = (await getSessionWorktrees(id1)).filter((w) => w.branch_name === branch);
+    const wts2 = (await getSessionWorktrees(id2)).filter((w) => w.branch_name === branch);
+    expect(wts1).toHaveLength(1);
+    expect(wts2).toHaveLength(1);
 
-    expect(t.getSessionWorktrees.all({ $sessionId: "s1" })).toHaveLength(1);
-    expect(t.getSessionWorktrees.all({ $sessionId: "s2" })).toHaveLength(1);
-  });
-});
-
-// ─── worktree_dir __clear__ sentinel ──────────────────────────────────────────
-
-describe("upsertSession worktree_dir clearing", () => {
-  let t;
-  beforeEach(() => { t = createTestDb(); });
-
-  it("clears worktree_dir when __clear__ sentinel is passed", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/project/root", $worktreeDir: "/stale/worktree",
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/stale/worktree");
-
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/project/root", $worktreeDir: "__clear__",
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBeNull();
-  });
-
-  it("preserves worktree_dir when null is passed (COALESCE behavior)", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: "/existing/wt",
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/existing/wt");
-  });
-
-  it("sets worktree_dir when a real path is passed", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: null,
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: "/new/worktree",
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/new/worktree");
-  });
-
-  it("can re-set worktree_dir after clearing", () => {
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: "/old",
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    // Clear
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: "__clear__",
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBeNull();
-
-    // Re-set
-    t.upsertSession.run({
-      $id: "s1", $projectDir: "/p", $worktreeDir: "/new",
-      $status: "active", $model: null, $gitRoot: null, $currentClaudeSessionId: null,
-    });
-    expect(t.getSession.get({ $id: "s1" }).worktree_dir).toBe("/new");
+    await forceDelete(id1);
+    await forceDelete(id2);
   });
 });

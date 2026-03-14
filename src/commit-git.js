@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { runGit } from "@agent-dashboard/diff-panel/server";
+import { runGit } from "@chorus/diff-panel/server";
 
 export async function getDirtySubmodules(dir, runGitFn = runGit, existsSyncFn = existsSync) {
   if (!existsSyncFn(join(dir, ".gitmodules"))) {
@@ -17,7 +17,7 @@ export async function getDirtySubmodules(dir, runGitFn = runGit, existsSyncFn = 
 
   const submodules = [];
   for (const line of gitmodulesContent.trim().split("\n")) {
-    const path = line.split(/\\s+/)[1];
+    const path = line.split(/\s+/)[1];
     if (!path) continue;
     const absPath = resolve(dir, path);
     if (!absPath.startsWith(dir)) continue;
@@ -60,7 +60,7 @@ export function createBuildPreviewDiff(deps = {}) {
   } = deps;
 
   return async function buildPreviewDiff(dir) {
-    const previewDir = mkdtempSyncImpl(joinImpl(tmpdirImpl(), "agent-dashboard-commit-"));
+    const previewDir = mkdtempSyncImpl(joinImpl(tmpdirImpl(), "chorus-commit-"));
     const previewIndexPath = joinImpl(previewDir, "index");
 
     try {

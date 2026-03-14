@@ -17,24 +17,31 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { spawn } from "node:child_process";
 
-const VPN_CHECK_URL = "https://dxsensei-api.walmart.com/health";
-const PROXY_URL = "http://proxy-intlho.wal-mart.com:8080";
-const NO_PROXY_LIST =
+// All VPN-related URLs, paths, and domains are configurable via env vars.
+// Defaults are Walmart-internal values; non-corporate deployments should either
+// set FORCE_OFF_VPN=1 to skip detection entirely, or override these values.
+const VPN_CHECK_URL = process.env.VPN_CHECK_URL || "https://dxsensei-api.walmart.com/health";
+const PROXY_URL = process.env.VPN_PROXY_URL || "http://proxy-intlho.wal-mart.com:8080";
+const NO_PROXY_LIST = process.env.VPN_NO_PROXY ||
   "localhost,127.0.0.1,.walmart.net,.prod.walmart.com,.qa.walmart.com," +
   ".cloud.walmart.com,.homeoffice.wal-mart.com,.cld.samsclub.com," +
   ".walmartlabs.com,.wmt,.local,.bfd.walmart.com,.gecwalmart.com," +
   ".walmart.com,wmlink";
 
-const CERT_SEARCH_PATHS = [
-  join(homedir(), ".walmart/certs/walmart-root-ca.cer"),
-  "/usr/local/share/walmart/certs/walmart-root-ca.cer",
-  "/opt/homebrew/share/walmart/certs/walmart-root-ca.cer",
-];
+const CERT_SEARCH_PATHS = process.env.VPN_CERT_SEARCH_PATHS
+  ? process.env.VPN_CERT_SEARCH_PATHS.split(",").map((p) => p.trim())
+  : [
+      join(homedir(), ".walmart/certs/walmart-root-ca.cer"),
+      "/usr/local/share/walmart/certs/walmart-root-ca.cer",
+      "/opt/homebrew/share/walmart/certs/walmart-root-ca.cer",
+    ];
 
-const OAUTH_PATHS = [
-  join(homedir(), ".wibey/.oauth_access_token_stage.json"),
-  join(homedir(), ".wibey/.oauth_access_token.json"),
-];
+const OAUTH_PATHS = process.env.VPN_OAUTH_PATHS
+  ? process.env.VPN_OAUTH_PATHS.split(",").map((p) => p.trim())
+  : [
+      join(homedir(), ".wibey/.oauth_access_token_stage.json"),
+      join(homedir(), ".wibey/.oauth_access_token.json"),
+    ];
 
 /** Current VPN state — exported so /api/health and /api/vpn can read it. */
 export const vpnState = {

@@ -5,11 +5,10 @@ import {
   touchSessionActive,
   getSession,
   getAllSessions,
-  resolveSessionId,
-  lookupSessionId,
   deleteSession,
   insertAlias,
-} from "../db.js";
+} from "../db-adapter.js";
+import { resolveSessionId, lookupSessionId } from "../session-resolver.js";
 import { isPromptActive, cancelPrompt, getActiveSwarmAgents, cancelSwarmAgent } from "../prompt.js";
 import { startWatching, stopWatching } from "../git-watcher.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
@@ -55,15 +54,12 @@ export default async function sessionRoutes(fastify) {
     let sessionId;
     if (swarmAgentId) {
       sessionId = claudeSessionId;
-      insertAlias.run({
-        $claudeSessionId: claudeSessionId,
-        $dashboardSessionId: claudeSessionId,
-      });
+      await insertAlias(claudeSessionId, claudeSessionId);
     } else {
       sessionId = await resolveSessionId(claudeSessionId, projectDir);
     }
 
-    const currentSession = getSession.get({ $id: sessionId });
+    const currentSession = await getSession(sessionId);
     const isAliasedToExisting = sessionId !== claudeSessionId;
     const existingSession = isAliasedToExisting ? currentSession : null;
     const isWorktree =
@@ -84,17 +80,17 @@ export default async function sessionRoutes(fastify) {
     const hasActivePrompt = isPromptActive(sessionId);
 
     const upsertParams = {
-      $id: sessionId,
-      $projectDir: isWorktree ? existingSession.project_dir : projectDir,
-      $worktreeDir: isWorktree
+      id: sessionId,
+      projectDir: isWorktree ? existingSession.project_dir : projectDir,
+      worktreeDir: isWorktree
         ? projectDir
           : shouldClearWorktree
             ? "__clear__"
             : (body.worktreeDir ?? null),
-      $gitRoot: null,
-      $status: "active",
-      $model: body.model || null,
-      $currentClaudeSessionId: hasActivePrompt ? null : claudeSessionId,
+      gitRoot: null,
+      status: "active",
+      model: body.model || null,
+      currentClaudeSessionId: hasActivePrompt ? null : claudeSessionId,
     };
     const nextSession = {
       project_dir: isWorktree
@@ -123,16 +119,16 @@ export default async function sessionRoutes(fastify) {
     let persistedHeartbeat = false;
 
     if (visibleChanged) {
-      upsertSession.run(upsertParams);
+      await upsertSession(upsertParams);
       invalidateDashboardSnapshot();
-      broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
+      broadcast({ type: "session:updated", session: await getSession(sessionId) });
       persistedHeartbeat = true;
     } else if (shouldPersistHeartbeat) {
-      const result = touchSessionActive.run({ $id: sessionId });
+      const result = await touchSessionActive(sessionId);
       if (result.changes === 0) {
-        upsertSession.run(upsertParams);
+        await upsertSession(upsertParams);
         invalidateDashboardSnapshot();
-        broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
+        broadcast({ type: "session:updated", session: await getSession(sessionId) });
       }
       persistedHeartbeat = true;
     }
@@ -171,17 +167,17 @@ export default async function sessionRoutes(fastify) {
   fastify.post("/api/sessions/:sessionId/stop", {
     config: { rawBody: true },
     handler: async (req, reply) => {
-      const sessionId = lookupSessionId(req.params.sessionId);
+      const sessionId = await lookupSessionId(req.params.sessionId);
 
       // Ignore stop from prompt subprocess — real session is still alive
       if (isPromptActive(sessionId)) {
         return { ok: true, ignored: true };
       }
 
-      const session = getSession.get({ $id: sessionId });
+      const session = await getSession(sessionId);
 
       try {
-        updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
+        await updateSessionStatus(sessionId, "stopped");
       } catch {
         console.log(`Session ${sessionId} not found for stop, ignoring`);
       }
@@ -190,7 +186,7 @@ export default async function sessionRoutes(fastify) {
       sessionHeartbeatState.delete(sessionId);
       clearSessionSyncState(sessionId);
       invalidateDashboardSnapshot();
-      broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
+      broadcast({ type: "session:updated", session: await getSession(sessionId) });
       return { ok: true };
     },
   });
@@ -200,7 +196,7 @@ export default async function sessionRoutes(fastify) {
    * 
    * @route GET /api/sessions
    */
-  fastify.get("/api/sessions", async () => getAllSessions.all());
+  fastify.get("/api/sessions", async () => getAllSessions());
 
   /**
    * Force-delete a session and all associated data.
@@ -208,8 +204,8 @@ export default async function sessionRoutes(fastify) {
    * @route DELETE /api/sessions/:sessionId
    */
   fastify.delete("/api/sessions/:sessionId", async (req, reply) => {
-    const sessionId = lookupSessionId(req.params.sessionId);
-    const session = getSession.get({ $id: sessionId });
+    const sessionId = await lookupSessionId(req.params.sessionId);
+    const session = await getSession(sessionId);
     if (!session) {
       return reply.code(404).send({ error: "Session not found" });
     }
@@ -223,10 +219,10 @@ export default async function sessionRoutes(fastify) {
 
     // Mark stopped so deleteSession() allows the DB cascade
     if (session.status === "active") {
-      updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
+      await updateSessionStatus(sessionId, "stopped");
     }
 
-    const deleted = deleteSession(sessionId);
+    const deleted = await deleteSession(sessionId);
     if (!deleted) {
       return reply.code(500).send({ error: "Failed to delete session" });
     }

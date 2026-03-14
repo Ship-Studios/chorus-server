@@ -10,7 +10,7 @@ import {
   updateSessionGitRoot,
   upsertSession,
   runInTransaction,
-} from "./db.js";
+} from "./db-adapter.js";
 
 const GIT_ROOT_CACHE_MAX = 200;
 const GIT_ROOT_CACHE_TTL_MS = 5 * 60_000;
@@ -112,9 +112,9 @@ async function cachedGitRoot(dir) {
 function scheduleGitRootHydration(sessionId, projectDir) {
   if (!projectDir || projectDir === "unknown") return;
   cachedGitRoot(projectDir)
-    .then((info) => {
+    .then(async (info) => {
       if (info?.root) {
-        updateSessionGitRoot.run({ $id: sessionId, $gitRoot: info.root });
+        await updateSessionGitRoot(sessionId, info.root);
       }
     })
     .catch(() => {});
@@ -141,29 +141,23 @@ function scheduleGitRootHydration(sessionId, projectDir) {
 export async function resolveSessionId(claudeSessionId, projectDir) {
   const needsProjectDir = projectDir && projectDir !== "unknown";
 
-  const directMatch = runInTransaction(() => {
-    const existing = getAlias.get({ $claudeSessionId: claudeSessionId });
+  const directMatch = await runInTransaction(async (tx) => {
+    const existing = await getAlias(claudeSessionId);
     if (existing) {
       return { id: existing.dashboard_session_id, git_root: null };
     }
 
     if (!needsProjectDir) return null;
 
-    const active = findActiveSessionByDir.get({ $projectDir: projectDir });
+    const active = await findActiveSessionByDir(projectDir);
     if (active) {
-      insertAlias.run({
-        $claudeSessionId: claudeSessionId,
-        $dashboardSessionId: active.id,
-      });
+      await insertAlias(claudeSessionId, active.id);
       return active;
     }
 
-    const recent = findRecentSessionByDir.get({ $projectDir: projectDir });
+    const recent = await findRecentSessionByDir(projectDir);
     if (recent) {
-      insertAlias.run({
-        $claudeSessionId: claudeSessionId,
-        $dashboardSessionId: recent.id,
-      });
+      await insertAlias(claudeSessionId, recent.id);
       return recent;
     }
 
@@ -188,70 +182,55 @@ export async function resolveSessionId(claudeSessionId, projectDir) {
   // be merged just because they share the same repo root.
   const useGitRootMatch = gitRoot !== null && projectDir === topLevel;
 
-  return runInTransaction(() => {
-    const existing = getAlias.get({ $claudeSessionId: claudeSessionId });
+  return runInTransaction(async (tx) => {
+    const existing = await getAlias(claudeSessionId);
     if (existing) {
       return existing.dashboard_session_id;
     }
 
     if (needsProjectDir) {
-      const active = findActiveSessionByDir.get({ $projectDir: projectDir });
+      const active = await findActiveSessionByDir(projectDir);
       if (active) {
-        insertAlias.run({
-          $claudeSessionId: claudeSessionId,
-          $dashboardSessionId: active.id,
-        });
+        await insertAlias(claudeSessionId, active.id);
         if (!active.git_root && gitRoot) {
-          updateSessionGitRoot.run({ $id: active.id, $gitRoot: gitRoot });
+          await updateSessionGitRoot(active.id, gitRoot);
         }
         return active.id;
       }
 
-      const recent = findRecentSessionByDir.get({ $projectDir: projectDir });
+      const recent = await findRecentSessionByDir(projectDir);
       if (recent) {
-        insertAlias.run({
-          $claudeSessionId: claudeSessionId,
-          $dashboardSessionId: recent.id,
-        });
+        await insertAlias(claudeSessionId, recent.id);
         if (!recent.git_root && gitRoot) {
-          updateSessionGitRoot.run({ $id: recent.id, $gitRoot: gitRoot });
+          await updateSessionGitRoot(recent.id, gitRoot);
         }
         return recent.id;
       }
 
       if (useGitRootMatch) {
-        const activeRoot = findActiveSessionByGitRoot.get({ $gitRoot: gitRoot });
+        const activeRoot = await findActiveSessionByGitRoot(gitRoot);
         if (activeRoot) {
-          insertAlias.run({
-            $claudeSessionId: claudeSessionId,
-            $dashboardSessionId: activeRoot.id,
-          });
+          await insertAlias(claudeSessionId, activeRoot.id);
           return activeRoot.id;
         }
 
-        const recentRoot = findRecentSessionByGitRoot.get({ $gitRoot: gitRoot });
+        const recentRoot = await findRecentSessionByGitRoot(gitRoot);
         if (recentRoot) {
-          insertAlias.run({
-            $claudeSessionId: claudeSessionId,
-            $dashboardSessionId: recentRoot.id,
-          });
+          await insertAlias(claudeSessionId, recentRoot.id);
           return recentRoot.id;
         }
       }
     }
 
-    insertAlias.run({
-      $claudeSessionId: claudeSessionId,
-      $dashboardSessionId: claudeSessionId,
-    });
-    upsertSession.run({
-      $id: claudeSessionId,
-      $projectDir: projectDir || "unknown",
-      $worktreeDir: null,
-      $gitRoot: gitRoot,
-      $status: "active",
-      $model: null,
-      $currentClaudeSessionId: claudeSessionId,
+    await insertAlias(claudeSessionId, claudeSessionId);
+    await upsertSession({
+      id: claudeSessionId,
+      projectDir: projectDir || "unknown",
+      worktreeDir: null,
+      gitRoot: gitRoot,
+      status: "active",
+      model: null,
+      currentClaudeSessionId: claudeSessionId,
     });
     return claudeSessionId;
   });
@@ -263,7 +242,7 @@ export async function resolveSessionId(claudeSessionId, projectDir) {
  * @param {string} claudeSessionId - The Claude Code session ID to look up
  * @returns {string} The canonical dashboard session ID
  */
-export function lookupSessionId(claudeSessionId) {
-  const existing = getAlias.get({ $claudeSessionId: claudeSessionId });
+export async function lookupSessionId(claudeSessionId) {
+  const existing = await getAlias(claudeSessionId);
   return existing ? existing.dashboard_session_id : claudeSessionId;
 }

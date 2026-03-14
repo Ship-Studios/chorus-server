@@ -1,4 +1,4 @@
-import { runGit } from "@agent-dashboard/diff-panel/server";
+import { runGit } from "@chorus/diff-panel/server";
 import { parseWorktreeListPorcelain } from "./git-worktree.js";
 
 const CACHE_TTL_MS = 30_000;

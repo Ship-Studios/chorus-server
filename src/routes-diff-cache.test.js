@@ -48,14 +48,8 @@ beforeEach(async () => {
     existsSync() {
       return true;
     },
-    getSession: {
-      get({ $id }) {
-        return sessions.get($id) ?? null;
-      },
-    },
-    lookupSessionId(sessionId) {
-      return sessionId;
-    },
+    getSession: async (id) => sessions.get(id) ?? null,
+    lookupSessionId: async (sessionId) => sessionId,
     parseDiffToFiles(diff) {
       parseDiffCalls.push(diff);
       const label = diff.includes("other-repo") ? "other-repo" : "cached";

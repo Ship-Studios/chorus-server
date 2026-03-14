@@ -2,12 +2,16 @@ import { describe, expect, it, beforeAll, afterAll, beforeEach } from "bun:test"
 import Fastify from "fastify";
 import { Database } from "bun:sqlite";
 
+const SKIP = !process.env.SUPABASE_DB_URL;
+
 /**
  * Integration tests for the swarm routes.
  * Mocks spawnSwarmAgent, cancelSwarmAgent, getActiveSwarmAgents, and broadcast
  * to test HTTP validation, status codes, and response shapes without spawning
  * real claude processes.
  */
+
+describe.skipIf(SKIP)("swarm routes", () => {
 
 let app;
 let db;
@@ -316,3 +320,5 @@ describe("GET /api/sessions/:sessionId/swarm", () => {
     expect(res.json()).toEqual([]);
   });
 });
+
+}); // describe.skipIf(SKIP)

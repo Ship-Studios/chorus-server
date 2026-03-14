@@ -21,12 +21,12 @@
 import { broadcastToSession, debouncedDiffInvalidation } from "../broadcast.js";
 import {
   getSession,
-  lookupSessionId,
   insertWorktree,
   updateWorktreeStats,
   updateWorktreeConflicts,
   getWorktree,
-} from "../db.js";
+} from "../db-adapter.js";
+import { lookupSessionId } from "../session-resolver.js";
 import { spawnSwarmAgent, cancelSwarmAgent, getActiveSwarmAgents } from "../prompt.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
 import { invalidateDiscoveredWorktrees } from "../worktree-discovery.js";
@@ -48,12 +48,12 @@ export default async function swarmRoutes(fastify) {
    * @param {import("fastify").FastifyReply} reply - Fastify reply
    * @returns {Promise<{ ok: boolean, agentId: string }>}
    */
-  fastify.post("/api/sessions/:sessionId/swarm/spawn", { bodyLimit: SPAWN_BODY_LIMIT }, async (req, reply) => {
+  fastify.post("/api/sessions/:sessionId/swarm/spawn", { bodyLimit: SPAWN_BODY_LIMIT, config: { rateLimit: { max: 10, timeWindow: 60_000 } } }, async (req, reply) => {
     const { prompt, description, permissionMode, model, useWorktree, image } = req.body ?? {};
     if (!prompt) return reply.code(400).send({ error: "prompt is required" });
 
-    const sessionId = lookupSessionId(req.params.sessionId);
-    const session = getSession.get({ $id: sessionId });
+    const sessionId = await lookupSessionId(req.params.sessionId);
+    const session = await getSession(sessionId);
     if (!session) return reply.code(404).send({ error: "Session not found" });
 
     const baseCwd = session.worktree_dir || session.project_dir;
@@ -83,37 +83,36 @@ export default async function swarmRoutes(fastify) {
          * All other events (swarm:chunk, swarm:spawned, etc.) are broadcast
          * directly with `parentSessionId` attached.
          */
-        (event) => {
+        async (event) => {
           // When a worktree agent finishes, persist the record to DB
           if (event.type === "swarm:done" && event.worktree) {
             const wt = event.worktree;
             const status = wt.filesChanged > 0 ? "ready" : "empty";
 
-            const { id: worktreeDbId } = insertWorktree.get({
-              $sessionId: sessionId,
-              $branchName: wt.branchName,
-              $baseBranch: wt.baseBranch,
-              $description: agentDescription,
-              $agentId: event.agentId,
-              $status: status,
+            const { id: worktreeDbId } = await insertWorktree({
+              sessionId,
+              branchName: wt.branchName,
+              baseBranch: wt.baseBranch,
+              description: agentDescription,
+              agentId: event.agentId,
+              status,
             });
 
-            updateWorktreeStats.run({
-              $id: worktreeDbId,
-              $filesChanged: wt.filesChanged,
-              $insertions: wt.insertions,
-              $deletions: wt.deletions,
-              $diffStat: wt.diffStat,
-              $status: status,
+            await updateWorktreeStats(worktreeDbId, {
+              filesChanged: wt.filesChanged,
+              insertions: wt.insertions,
+              deletions: wt.deletions,
+              diffStat: wt.diffStat,
+              status,
             });
 
             if (wt.conflictInfo) {
-              updateWorktreeConflicts.run({ $id: worktreeDbId, $conflictInfo: wt.conflictInfo });
+              await updateWorktreeConflicts(worktreeDbId, wt.conflictInfo);
             }
 
             invalidateDiscoveredWorktrees(session.project_dir);
             invalidateDashboardSnapshot();
-            const worktreeRow = getWorktree.get({ $id: worktreeDbId });
+            const worktreeRow = await getWorktree(worktreeDbId);
             broadcastToSession(sessionId, { type: "worktree:ready", worktree: worktreeRow, parentSessionId: sessionId });
 
             // Strip redundant worktree stats from swarm:done — the worktree:ready message
@@ -165,7 +164,7 @@ export default async function swarmRoutes(fastify) {
    * @returns {Promise<Array<import("../prompt.js").SwarmAgent>>}
    */
   fastify.get("/api/sessions/:sessionId/swarm", async (req) => {
-    const sessionId = lookupSessionId(req.params.sessionId);
+    const sessionId = await lookupSessionId(req.params.sessionId);
     return getActiveSwarmAgents(sessionId);
   });
 }

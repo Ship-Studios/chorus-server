@@ -17,14 +17,14 @@ import {
   updateWorktreeStatus,
   updateWorktreeConflicts,
   deleteWorktreeRow,
-} from "../../db.js";
+} from "../../db-adapter.js";
 import {
   deleteBranchAsync,
   detectConflictsAsync,
   parseWorktreeListPorcelain,
   removeWorktree,
 } from "../../git-worktree.js";
-import { runGit } from "@agent-dashboard/diff-panel/server";
+import { runGit } from "@chorus/diff-panel/server";
 import { invalidateDiscoveredWorktrees } from "../../worktree-discovery.js";
 import { invalidateDashboardSnapshot } from "../../dashboard-snapshot.js";
 
@@ -44,11 +44,11 @@ export default async function worktreeMutationRoutes(fastify) {
    * @param {import("fastify").FastifyReply} reply - Fastify reply
    */
   fastify.post("/api/worktrees/:worktreeId/merge", async (req, reply) => {
-    const wt = getWorktree.get({ $id: Number(req.params.worktreeId) });
+    const wt = await getWorktree(Number(req.params.worktreeId));
     if (!wt) return reply.code(404).send({ error: "Worktree not found" });
     if (wt.status === "merged") return reply.code(400).send({ error: "Already merged" });
 
-    const session = getSession.get({ $id: wt.session_id });
+    const session = await getSession(wt.session_id);
     if (!session) return reply.code(404).send({ error: "Session not found" });
 
     const dir = session.project_dir;
@@ -59,10 +59,10 @@ export default async function worktreeMutationRoutes(fastify) {
     try {
       await runGit(dir, ["merge", "--no-ff", "-m", `Merge ${wt.branch_name}: ${wt.description || "agent changes"}`, wt.branch_name]);
       await deleteBranchAsync(dir, wt.branch_name);
-      updateWorktreeStatus.run({ $id: wt.id, $status: "merged" });
+      await updateWorktreeStatus(wt.id, "merged");
       invalidateDiscoveredWorktrees(dir);
       invalidateDashboardSnapshot();
-      const updated = getWorktree.get({ $id: wt.id });
+      const updated = await getWorktree(wt.id);
       broadcastToSession(wt.session_id, { type: "worktree:updated", worktree: updated, parentSessionId: wt.session_id });
       return { ok: true, status: "merged" };
     } catch (err) {
@@ -80,10 +80,10 @@ export default async function worktreeMutationRoutes(fastify) {
    * @param {import("fastify").FastifyReply} reply - Fastify reply
    */
   fastify.delete("/api/worktrees/:worktreeId", async (req, reply) => {
-    const wt = getWorktree.get({ $id: Number(req.params.worktreeId) });
+    const wt = await getWorktree(Number(req.params.worktreeId));
     if (!wt) return reply.code(404).send({ error: "Worktree not found" });
 
-    const session = getSession.get({ $id: wt.session_id });
+    const session = await getSession(wt.session_id);
     if (session) {
       const dir = session.project_dir;
       if (dir && existsSync(dir)) {
@@ -104,7 +104,7 @@ export default async function worktreeMutationRoutes(fastify) {
       }
     }
 
-    deleteWorktreeRow.run({ $id: wt.id });
+    await deleteWorktreeRow(wt.id);
     if (session?.project_dir) {
       invalidateDiscoveredWorktrees(session.project_dir);
     }
@@ -123,10 +123,10 @@ export default async function worktreeMutationRoutes(fastify) {
    * @param {import("fastify").FastifyReply} reply - Fastify reply
    */
   fastify.post("/api/worktrees/:worktreeId/check-conflicts", async (req, reply) => {
-    const wt = getWorktree.get({ $id: Number(req.params.worktreeId) });
+    const wt = await getWorktree(Number(req.params.worktreeId));
     if (!wt) return reply.code(404).send({ error: "Worktree not found" });
 
-    const session = getSession.get({ $id: wt.session_id });
+    const session = await getSession(wt.session_id);
     if (!session) return reply.code(404).send({ error: "Session not found" });
 
     const dir = session.project_dir;
@@ -135,9 +135,9 @@ export default async function worktreeMutationRoutes(fastify) {
     }
 
     const conflictInfo = await detectConflictsAsync(dir, wt.base_branch, wt.branch_name);
-    updateWorktreeConflicts.run({ $id: wt.id, $conflictInfo: conflictInfo });
+    await updateWorktreeConflicts(wt.id, conflictInfo);
     invalidateDashboardSnapshot();
-    const updated = getWorktree.get({ $id: wt.id });
+    const updated = await getWorktree(wt.id);
     broadcastToSession(wt.session_id, { type: "worktree:updated", worktree: updated, parentSessionId: wt.session_id });
     return { ok: true, conflicts: !!conflictInfo, conflictInfo };
   });

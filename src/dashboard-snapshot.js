@@ -3,7 +3,7 @@ import {
   getRecentEventsSlim,
   getRecentAgentsSlim,
   getAllActiveWorktrees,
-} from "./db.js";
+} from "./db-adapter.js";
 
 let snapshotVersion = 0;
 let cachedVersion = -1;
@@ -11,13 +11,14 @@ let cachedSnapshot = null;
 let inflightSnapshot = null;
 let inflightVersion = -1;
 
-function buildSnapshot() {
-  return {
-    sessions: getAllSessions.all(),
-    recentEvents: getRecentEventsSlim.all(),
-    agents: getRecentAgentsSlim.all(),
-    worktrees: getAllActiveWorktrees.all(),
-  };
+async function buildSnapshot() {
+  const [sessions, recentEvents, agents, worktrees] = await Promise.all([
+    getAllSessions(),
+    getRecentEventsSlim(),
+    getRecentAgentsSlim(),
+    getAllActiveWorktrees(),
+  ]);
+  return { sessions, recentEvents, agents, worktrees };
 }
 
 export function invalidateDashboardSnapshot() {
@@ -36,8 +37,7 @@ export async function getDashboardSnapshot() {
 
   const requestVersion = snapshotVersion;
   inflightVersion = requestVersion;
-  inflightSnapshot = Promise.resolve().then(() => {
-    const snapshot = buildSnapshot();
+  inflightSnapshot = buildSnapshot().then((snapshot) => {
     if (snapshotVersion === requestVersion) {
       cachedSnapshot = snapshot;
       cachedVersion = requestVersion;

@@ -7,7 +7,7 @@
  *  1. Create and configure the Fastify app (CORS, WebSocket, static files).
  *  2. Register the WebSocket `/ws` endpoint with client-cap and heartbeat.
  *  3. Register all REST API route plugins (sessions, events, diff, prompt,
- *     swarm, worktrees, architecture, diff-summary, commit, crafting).
+ *     swarm, worktrees, diff-summary, commit, crafting).
  *  4. Expose `/api/health` and `/api/vpn/reconfigure` utility endpoints.
  *  5. Detect VPN state and configure proxy/cert environment before listening.
  *  6. Serve the pre-built SvelteKit UI as static files in production.
@@ -37,6 +37,8 @@ import fastifyStatic from "@fastify/static";
 import compress from "@fastify/compress";
 import underPressure from "@fastify/under-pressure";
 import etag from "@fastify/etag";
+import helmet from "@fastify/helmet";
+import rateLimit from "@fastify/rate-limit";
 import { Server as SocketIO } from "socket.io";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -60,7 +62,7 @@ import { setIO } from "./socket.js";
  * Uses `bun:sqlite` in WAL mode with `$paramName` binding syntax.
  * `deduplicateSessions()` cleans up TOCTOU race duplicates from `resolveSessionId()`.
  */
-import { getActiveSessions, deduplicateSessions } from "./db.js";
+import { getActiveSessions, deduplicateSessions, pruneOldData, reconcileOrphanedSessions } from "./db-adapter.js";
 import { getDashboardSnapshot } from "./dashboard-snapshot.js";
 
 /**
@@ -116,8 +118,6 @@ import swarmRoutes from "./routes/swarm.js";
  */
 import worktreeRoutes from "./routes/worktrees/index.js";
 
-/** @see {@link ./routes/architecture.js} — Project source tree + import graph scanning (30s cache). */
-import architectureRoutes from "./routes/architecture.js";
 
 /**
  * @see {@link ./routes/diff-summary.js} — AI-generated diff summaries via Anthropic API.
@@ -147,14 +147,6 @@ import craftingRoutes, { resetClient as resetCraftingClient } from "./routes/cra
  */
 import directoryRoutes from "./routes/directories.js";
 
-/**
- * @see {@link ./routes/flint.js} — Mobey MCP proxy + AI executive assistant.
- * Endpoints: GET /api/flint/status, /api/flint/ai-status, /api/flint/todos,
- *             /api/flint/boards, POST /api/flint/chat (SSE streaming).
- * Requires `MOBEY_API_KEY`; chat also requires `ANTHROPIC_API_KEY`.
- * `resetClient`: Invalidates the cached Anthropic client (for VPN reconfiguration).
- */
-import flintRoutes, { resetClient as resetFlintClient } from "./routes/flint.js";
 
 /** @type {number} Server listen port, overridable via PORT env var. */
 const PORT = process.env.PORT ?? 3001;
@@ -168,7 +160,20 @@ const PORT = process.env.PORT ?? 3001;
 
 const app = Fastify({ logger: true });
 
-await app.register(cors, { origin: true, methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] });
+// CORS origin allowlist — defaults to localhost origins for dev safety.
+// Override with CORS_ORIGINS env var (comma-separated) for production deployments.
+const corsOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim())
+  : ["http://localhost:5173", "http://localhost:3001", "http://localhost:5174"];
+await app.register(cors, { origin: corsOrigins, methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] });
+
+// Security headers — X-Content-Type-Options, X-Frame-Options, HSTS, Referrer-Policy, etc.
+// CSP is relaxed to allow inline styles (Tailwind), WebSocket connections, and data: URIs
+// for fonts/images. In production behind HTTPS, tighten these further.
+await app.register(helmet, {
+  contentSecurityPolicy: false, // SPA with inline styles + WS — too many exceptions needed
+  crossOriginEmbedderPolicy: false, // Breaks embedded images / fonts from CDNs
+});
 
 // Brotli/gzip compression for large GET responses (diff payloads, event lists).
 // Skip compression below 1KB — hook ACKs and small JSON don't benefit.
@@ -186,6 +191,53 @@ await app.register(underPressure, {
   message: "Server under pressure",
   retryAfter: 50,
 });
+
+// Global rate limit — generous default, tightened on expensive routes via per-route config.
+// Prevents abuse of Anthropic API-calling endpoints when the server is network-exposed.
+await app.register(rateLimit, {
+  max: 200,          // requests per window
+  timeWindow: 60_000, // 1 minute
+  allowList: ["127.0.0.1", "::1"], // localhost is exempt from global limit
+});
+
+// ---------------------------------------------------------------------------
+// Optional API key authentication
+// ---------------------------------------------------------------------------
+// When DASHBOARD_API_KEY is set, all /api/ endpoints (except health and static
+// file serving) require a matching Bearer token. This is opt-in: on localhost
+// without the env var, everything works as before. For network deployments,
+// set DASHBOARD_API_KEY to lock down destructive endpoints (commit, swarm, etc.).
+//
+// Hook scripts pass the same token via the Authorization header.
+
+const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY;
+
+if (DASHBOARD_API_KEY) {
+  app.addHook("onRequest", async (request, reply) => {
+    const { url } = request;
+
+    // Exempt: health probe, static UI files, socket.io (handled separately)
+    if (url === "/api/health" || !url.startsWith("/api/")) return;
+
+    // Exempt: Claude Code HTTP hook endpoints — these come from localhost and
+    // don't support custom auth headers in Claude Code's settings.json config.
+    // They are event notifications (heartbeat, tool events), not destructive ops.
+    if (url.startsWith("/api/hooks/")) return;
+
+    // Exempt: session registration from hooks (session-start.sh sends auth when
+    // DASHBOARD_API_KEY is set, but the HTTP hooks that also call /api/sessions
+    // cannot add headers). Allow POST /api/sessions without auth since it's an
+    // upsert/heartbeat, not destructive.
+    if (url === "/api/sessions" && request.method === "POST") return;
+
+    const authHeader = request.headers.authorization;
+    if (!authHeader || authHeader !== `Bearer ${DASHBOARD_API_KEY}`) {
+      reply.code(401).send({ error: "Unauthorized — set DASHBOARD_API_KEY" });
+    }
+  });
+
+  app.log.info("API key authentication enabled (DASHBOARD_API_KEY is set)");
+}
 
 /**
  * Hard cap on concurrent Socket.IO dashboard clients.
@@ -210,8 +262,14 @@ app.addHook("onClose", () => {
 
 // Graceful shutdown on signals — ensures onClose hook fires, cleaning up
 // heartbeat timer, diff debounce timers, git watchers, and WS connections.
+// The explicit process.exit() is required because registering a signal handler
+// suppresses the default termination behavior. Without it, the old process
+// lingers with the port still bound, causing EADDRINUSE when bun --watch
+// restarts the server.
 for (const sig of ["SIGTERM", "SIGINT"]) {
-  process.on(sig, () => app.close());
+  process.on(sig, () => {
+    app.close().then(() => process.exit(0));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +282,7 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
 //
 // Route groups:
 //   Core data    — sessions, events (hook adapters, CRUD, queries)
-//   Code intel   — diff, architecture, diff-summary, commit
+//   Code intel   — diff, diff-summary, commit
 //   Interaction  — prompt (--resume streaming), swarm (independent agents)
 //   Isolation    — worktrees (git worktree lifecycle + merge/discard)
 //   Creative     — crafting (agent workbench + AI synthesis)
@@ -235,12 +293,10 @@ await app.register(diffRoutes);         // GET              /api/sessions/:id/di
 await app.register(promptRoutes);       // POST/GET         /api/sessions/:id/prompt{,/cancel,/status}
 await app.register(swarmRoutes);        // POST/GET         /api/sessions/:id/swarm/spawn, /api/swarm/:agentId/cancel
 await app.register(worktreeRoutes);     // GET/POST/DELETE  /api/sessions/:id/worktrees, /api/worktrees/:id/{diff,files,merge,check-conflicts}
-await app.register(architectureRoutes); // GET              /api/sessions/:id/architecture
 await app.register(diffSummaryRoutes);  // POST/GET         /api/sessions/:id/diff/summary, /api/diff-summary/status
 await app.register(commitRoutes);       // POST             /api/sessions/:id/commit
 await app.register(craftingRoutes);     // GET/POST/PUT/DELETE /api/craft/{agents,recipes}, POST /api/craft/synthesize
 await app.register(directoryRoutes);   // GET              /api/directories
-await app.register(flintRoutes);       // GET              /api/flint/status, /api/flint/todos
 
 /**
  * Clean up duplicate sessions from prior TOCTOU races in resolveSessionId().
@@ -248,7 +304,28 @@ await app.register(flintRoutes);       // GET              /api/flint/status, /a
  * and both create new sessions before seeing the other's row. Safe to run on
  * every startup — idempotent dedup that keeps the most recently seen session.
  */
-deduplicateSessions();
+await deduplicateSessions();
+
+// Orphan reconciliation — mark active sessions as stopped if they haven't
+// been seen in 30 minutes (likely orphaned by a prior server crash).
+const orphaned = await reconcileOrphanedSessions();
+if (orphaned > 0) {
+  app.log.info(`[startup] Marked ${orphaned} orphaned session(s) as stopped`);
+}
+
+// Data retention — prune old events/sessions on startup and every 24 hours.
+// Configurable via DATA_RETENTION_DAYS env var (default: 30 days).
+try {
+  const pruned = await pruneOldData();
+  if (pruned.eventsDeleted || pruned.sessionsDeleted) {
+    app.log.info(`[retention] Pruned ${pruned.eventsDeleted} events, ${pruned.sessionsDeleted} sessions`);
+  }
+} catch (err) {
+  app.log.warn(`[retention] Startup prune failed: ${err.message}`);
+}
+setInterval(() => {
+  try { pruneOldData(); } catch { /* non-critical */ }
+}, 24 * 60 * 60 * 1000); // 24 hours
 
 // ---------------------------------------------------------------------------
 // Utility endpoints (not in separate route files — lightweight, app-level)
@@ -290,7 +367,6 @@ app.post("/api/vpn/reconfigure", async () => {
   resetDiffSummaryClient();
   resetCommitClient();
   resetCraftingClient();
-  resetFlintClient();
   const result = await reconfigureVpn();
   return { ok: true, ...result };
 });
@@ -306,7 +382,7 @@ app.post("/api/vpn/reconfigure", async () => {
  * `diff:invalidated` over WebSocket so the UI auto-refreshes diffs — even
  * when changes come from outside Claude Code hooks (e.g. manual `git commit`).
  */
-initWatchers(getActiveSessions.all());
+initWatchers(await getActiveSessions());
 
 /**
  * Static file serving for the production SvelteKit SPA.
@@ -384,12 +460,21 @@ await configureVpn();
 await app.ready();
 
 io = new SocketIO(app.server, {
-  cors: { origin: true },
+  cors: { origin: corsOrigins },
   pingInterval: 30_000,
   pingTimeout: 10_000,
   maxHttpBufferSize: 1_000_000,
 });
 setIO(io);
+
+// Socket.IO auth middleware — reject unauthenticated connections when API key is set.
+if (DASHBOARD_API_KEY) {
+  io.use((socket, next) => {
+    const token = socket.handshake.auth?.token;
+    if (token === DASHBOARD_API_KEY) return next();
+    next(new Error("Unauthorized — invalid or missing API key"));
+  });
+}
 
 io.on("connection", (socket) => {
   if (io.engine.clientsCount > MAX_WS_CLIENTS) {

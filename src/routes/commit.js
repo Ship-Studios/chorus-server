@@ -11,8 +11,9 @@
  */
 import { existsSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
-import { getSession, lookupSessionId } from "../db.js";
-import { runGit, buildStatSummary, parseDiffToFiles } from "@agent-dashboard/diff-panel/server";
+import { getSession } from "../db-adapter.js";
+import { lookupSessionId } from "../session-resolver.js";
+import { runGit, buildStatSummary, parseDiffToFiles, truncateDiff } from "@chorus/diff-panel/server";
 import { getAnthropicFetchOptions } from "../vpn.js";
 import { broadcastToSession } from "../broadcast.js";
 import { handleAnthropicError } from "../anthropic-error.js";
@@ -70,7 +71,7 @@ export function createCommitRoutes(deps = {}) {
   } = deps;
 
   return async function commitRoutes(fastify) {
-    fastify.post("/api/sessions/:sessionId/commit", async (req, reply) => {
+    fastify.post("/api/sessions/:sessionId/commit", { config: { rateLimit: { max: 5, timeWindow: 60_000 } } }, async (req, reply) => {
       const anthropic = getClient(AnthropicImpl, getAnthropicFetchOptionsImpl);
       if (!anthropic) {
         return reply.code(503).send({
@@ -78,8 +79,8 @@ export function createCommitRoutes(deps = {}) {
         });
       }
 
-      const sessionId = lookupSessionIdImpl(req.params.sessionId);
-      const session = getSessionImpl.get({ $id: sessionId });
+      const sessionId = await lookupSessionIdImpl(req.params.sessionId);
+      const session = await getSessionImpl(sessionId);
       if (!session) return reply.code(404).send({ error: "Session not found" });
 
       const dir = session.worktree_dir || session.project_dir;
