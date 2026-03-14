@@ -114,8 +114,9 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
       onDone({ code, cancelled: entry?.cancelled ?? false, freshSession: didFallback || false });
       if (entry) entry.done = true;
       setTimeout(() => {
-        const current = activePrompts.get(dashboardSessionId);
-        if (current?.done) activePrompts.delete(dashboardSessionId);
+        // Only delete if this specific entry is still in the map —
+        // a new prompt may have replaced it before the timer fires.
+        if (activePrompts.get(dashboardSessionId) === entry) activePrompts.delete(dashboardSessionId);
       }, 5000);
     });
 
@@ -127,8 +128,7 @@ export function sendPrompt(dashboardSessionId, { prompt, cwd, claudeSessionId, p
       const entry = activePrompts.get(dashboardSessionId);
       if (entry) entry.done = true;
       setTimeout(() => {
-        const current = activePrompts.get(dashboardSessionId);
-        if (current?.done) activePrompts.delete(dashboardSessionId);
+        if (activePrompts.get(dashboardSessionId) === entry) activePrompts.delete(dashboardSessionId);
       }, 5000);
     });
   }

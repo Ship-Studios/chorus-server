@@ -37,7 +37,7 @@ import {
   insertEventRow,
   getEvent,
   getSessionEvents,
-  getRecentEvents,
+  getRecentEventsSlim,
   insertAgent,
   getSessionAgents,
   resolveSessionId,
@@ -53,6 +53,16 @@ const MAX_PAYLOAD_STRING_CHARS = 50_000;
 const SESSION_SYNC_INTERVAL_MS = 5_000;
 const TRUNCATED_SUFFIX = "…[truncated]";
 const sessionSyncState = new Map();
+
+/**
+ * Remove sync state for a session. Called by the session delete handler
+ * to prevent accumulating entries for sessions deleted via the UI
+ * without firing the Stop hook.
+ * @param {string} sessionId
+ */
+export function clearSessionSyncState(sessionId) {
+  sessionSyncState.delete(sessionId);
+}
 
 function truncateString(value) {
   if (typeof value !== "string" || value.length <= MAX_PAYLOAD_STRING_CHARS) {
@@ -379,7 +389,7 @@ export default async function eventRoutes(fastify) {
     return event;
   });
 
-  fastify.get("/api/events", async () => getRecentEvents.all());
+  fastify.get("/api/events", async () => getRecentEventsSlim.all());
 
   fastify.get("/api/sessions/:sessionId/agents", async (req) => {
     const sessionId = lookupSessionId(req.params.sessionId);

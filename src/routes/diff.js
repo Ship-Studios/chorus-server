@@ -236,10 +236,12 @@ async function materializeDiffResult(dir, result, deps) {
   }
 
   result.materializePromise = (async () => {
-    const files = parseDiffToFilesImpl(result.rawDiff);
-    const branch = result.hasHead
-      ? await runGitImpl(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).then((value) => value.trim()).catch(() => "unknown")
-      : "unknown";
+    const [files, branch] = await Promise.all([
+      Promise.resolve(parseDiffToFilesImpl(result.rawDiff)),
+      result.hasHead
+        ? runGitImpl(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).then((value) => value.trim()).catch(() => "unknown")
+        : Promise.resolve("unknown"),
+    ]);
     const materialized = {
       directory: dir,
       branch,
@@ -320,10 +322,12 @@ async function computeFilteredDiff(dir, fileFilter, sessionId, maxFiles, reply, 
     ]);
   }
 
-  const files = parseDiffToFilesImpl(rawDiff);
-  const branch = hasHead
-    ? await runGitImpl(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).then((v) => v.trim()).catch(() => "unknown")
-    : "unknown";
+  const [files, branch] = await Promise.all([
+    Promise.resolve(parseDiffToFilesImpl(rawDiff)),
+    hasHead
+      ? runGitImpl(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).then((v) => v.trim()).catch(() => "unknown")
+      : Promise.resolve("unknown"),
+  ]);
   const stat = buildStatSummaryImpl(files);
 
   return applyMaxFiles({ sessionId, directory: dir, branch, stat, files }, maxFiles);

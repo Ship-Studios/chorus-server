@@ -13,6 +13,7 @@ import {
 import { isPromptActive, cancelPrompt, getActiveSwarmAgents, cancelSwarmAgent } from "../prompt.js";
 import { startWatching, stopWatching } from "../git-watcher.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
+import { clearSessionSyncState } from "./events.js";
 
 const SESSION_HEARTBEAT_INTERVAL_MS = 5_000;
 const sessionHeartbeatState = new Map();
@@ -177,12 +178,15 @@ export default async function sessionRoutes(fastify) {
         return { ok: true, ignored: true };
       }
 
+      const session = getSession.get({ $id: sessionId });
+
       try {
         updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
       } catch {
         console.log(`Session ${sessionId} not found for stop, ignoring`);
       }
 
+      stopWatching(sessionId, session?.worktree_dir || session?.project_dir);
       sessionHeartbeatState.delete(sessionId);
       invalidateDashboardSnapshot();
       broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
@@ -227,6 +231,7 @@ export default async function sessionRoutes(fastify) {
     }
 
     sessionHeartbeatState.delete(sessionId);
+    clearSessionSyncState(sessionId);
     invalidateDashboardSnapshot();
     broadcast({ type: "session:deleted", sessionId });
     return { ok: true };

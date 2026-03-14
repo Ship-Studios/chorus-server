@@ -139,6 +139,7 @@ export function slugify(desc) {
 /**
  * Get the current branch name of the repository.
  *
+ * @deprecated Use `getCurrentBranchAsync` instead to avoid blocking the event loop.
  * @param {string} repoDir - The path to the git repository.
  * @returns {string} The current branch name (defaults to 'main' on error).
  */

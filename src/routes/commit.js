@@ -17,6 +17,7 @@ import { getSession, lookupSessionId } from "../db.js";
 import { runGit, buildStatSummary, parseDiffToFiles } from "@agent-dashboard/diff-panel/server";
 import { getAnthropicFetchOptions } from "../vpn.js";
 import { broadcastToSession } from "../broadcast.js";
+import { handleAnthropicError } from "../anthropic-error.js";
 
 const MAX_DIFF_CHARS = 30_000;
 const MAX_SUBMODULE_DIFF_CHARS = 15_000;
@@ -318,10 +319,7 @@ export function createCommitRoutes(deps = {}) {
           commitMessage = msg.content[0]?.text?.trim() ?? "";
         } catch (err) {
           fastify.log.error(err, "Anthropic API error during commit message generation");
-          const status = err.status;
-          if (status === 429) return reply.code(429).send({ error: "Rate limited — try again later" });
-          if (status === 529) return reply.code(503).send({ error: "AI service overloaded — try again later" });
-          if (status === 401) return reply.code(502).send({ error: "API key configuration error" });
+          if (handleAnthropicError(err, reply)) return;
           return reply.code(502).send({ error: `Commit message generation failed: ${err.message}` });
         }
 
@@ -418,10 +416,7 @@ export function createCommitRoutes(deps = {}) {
       } catch (err) {
         // Distinguish API errors from JSON parse errors — propagate rate limits
         // and auth failures so the caller knows, rather than silently falling back.
-        const status = err?.status;
-        if (status === 429) return reply.code(429).send({ error: "Rate limited — try again later" });
-        if (status === 529) return reply.code(503).send({ error: "AI service overloaded — try again later" });
-        if (status === 401) return reply.code(502).send({ error: "API key configuration error" });
+        if (handleAnthropicError(err, reply)) return;
 
         // JSON parse error or other non-critical failure: fall back to simple messages
         aiFallback = true;

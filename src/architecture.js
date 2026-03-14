@@ -750,6 +750,7 @@ function resolveRelative(fromDir, specifier) {
 const cache = new Map();
 const inflight = new Map();
 const CACHE_TTL = 30_000; // 30 seconds
+const CACHE_MAX_SIZE = 100;
 
 /**
  * Retrieves the project architecture, using a cache to avoid redundant scans.
@@ -771,6 +772,9 @@ export async function getArchitecture(projectDir) {
   const promise = scanArchitecture(projectDir)
     .then((result) => {
       cache.set(projectDir, { result, timestamp: Date.now() });
+      if (cache.size > CACHE_MAX_SIZE) {
+        cache.delete(cache.keys().next().value);
+      }
       return result;
     })
     .finally(() => {

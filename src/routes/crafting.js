@@ -31,6 +31,7 @@
 
 import { getAnthropicFetchOptions } from "../vpn.js";
 import Anthropic from "@anthropic-ai/sdk";
+import { handleAnthropicError } from "../anthropic-error.js";
 import {
   getAllCraftAgents,
   getCraftAgent,

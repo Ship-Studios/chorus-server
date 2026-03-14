@@ -30,6 +30,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getSession, lookupSessionId } from "../db.js";
 import { runGit, buildStatFromShortstat, summarizeDiff } from "@agent-dashboard/diff-panel/server";
 import { getAnthropicFetchOptions } from "../vpn.js";
+import { handleAnthropicError } from "../anthropic-error.js";
 
 // ── In-memory cache keyed on SHA-256 of diff content ────────────────────────
 const cache = new Map(); // Map<hash, { summary, model, timestamp }>
@@ -242,18 +243,7 @@ export function createDiffSummaryRoutes(deps = {}) {
         return { summary: result.summary, model: result.model, cached: false };
       } catch (err) {
         fastify.log.error(err, "Anthropic API error");
-        const status = err.status;
-        if (status === 429) {
-          const retryAfter = err.headers?.["retry-after"];
-          const headers = retryAfter ? { "Retry-After": retryAfter } : {};
-          return reply.code(429).headers(headers).send({ error: "Rate limited — try again later" });
-        }
-        if (status === 529) {
-          return reply.code(503).send({ error: "AI service overloaded — try again later" });
-        }
-        if (status === 401) {
-          return reply.code(502).send({ error: "API key configuration error" });
-        }
+        if (handleAnthropicError(err, reply)) return;
         return reply.code(502).send({
           error: `Summary generation failed: ${err.message}`,
         });

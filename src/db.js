@@ -499,6 +499,17 @@ export function deduplicateSessions() {
     GROUP BY project_dir HAVING COUNT(*) > 1
   `).all();
 
+  const updateAliases = db.prepare(`UPDATE session_aliases SET dashboard_session_id = $keep WHERE dashboard_session_id = $id`);
+  const updateEvents = db.prepare(`UPDATE events SET session_id = $keep WHERE session_id = $id`);
+  const updateAgents = db.prepare(`UPDATE agents SET session_id = $keep WHERE session_id = $id`);
+  const deleteConflictingWorktrees = db.prepare(`
+    DELETE FROM worktrees
+    WHERE session_id = $id
+      AND branch_name IN (SELECT branch_name FROM worktrees WHERE session_id = $keep)
+  `);
+  const updateWorktrees = db.prepare(`UPDATE worktrees SET session_id = $keep WHERE session_id = $id`);
+  const deleteSession = db.prepare(`DELETE FROM sessions WHERE id = $id`);
+
   for (const { project_dir, ids } of dupes) {
     const idList = ids.split(",");
     const keep = idList[0];
@@ -506,25 +517,17 @@ export function deduplicateSessions() {
     db.transaction(() => {
       for (const id of remove) {
         const dup = getSession.get({ $id: id });
-        db.prepare(`UPDATE session_aliases SET dashboard_session_id = $keep WHERE dashboard_session_id = $id`)
-          .run({ $keep: keep, $id: id });
-        db.prepare(`UPDATE events SET session_id = $keep WHERE session_id = $id`)
-          .run({ $keep: keep, $id: id });
-        db.prepare(`UPDATE agents SET session_id = $keep WHERE session_id = $id`)
-          .run({ $keep: keep, $id: id });
+        updateAliases.run({ $keep: keep, $id: id });
+        updateEvents.run({ $keep: keep, $id: id });
+        updateAgents.run({ $keep: keep, $id: id });
         // Remove worktrees from the duplicate session that would conflict with
         // an existing (session_id, branch_name) row on the canonical session.
-        db.prepare(`
-          DELETE FROM worktrees
-          WHERE session_id = $id
-            AND branch_name IN (SELECT branch_name FROM worktrees WHERE session_id = $keep)
-        `).run({ $keep: keep, $id: id });
-        db.prepare(`UPDATE worktrees SET session_id = $keep WHERE session_id = $id`)
-          .run({ $keep: keep, $id: id });
+        deleteConflictingWorktrees.run({ $keep: keep, $id: id });
+        updateWorktrees.run({ $keep: keep, $id: id });
         if (dup?.git_root) {
           updateSessionGitRoot.run({ $id: keep, $gitRoot: dup.git_root });
         }
-        db.prepare(`DELETE FROM sessions WHERE id = $id`).run({ $id: id });
+        deleteSession.run({ $id: id });
       }
     })();
     console.log(`[dedup] Merged ${remove.length} duplicate session(s) for ${project_dir} → ${keep}`);
