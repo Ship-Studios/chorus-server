@@ -577,7 +577,8 @@ export default async function flintRoutes(fastify) {
    *   { type: "done" }                                    — stream complete
    *   { type: "error",      error: string }               — fatal error
    */
-  fastify.post("/api/flint/chat", async (req, reply) => {
+  // Disable compression for SSE — @fastify/compress buffering delays chunk delivery.
+  fastify.post("/api/flint/chat", { config: { compress: false } }, async (req, reply) => {
     const anthropic = getClient();
 
     if (!process.env.MOBEY_API_KEY) {
