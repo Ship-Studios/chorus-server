@@ -33,36 +33,25 @@
  */
 import { broadcast, broadcastToSession, debouncedDiffInvalidation } from "../broadcast.js";
 import {
-  upsertSession,
   insertEventRow,
   getEvent,
   getSessionEvents,
   getRecentEventsSlim,
-  insertAgent,
   getSessionAgents,
   resolveSessionId,
   lookupSessionId,
   updateSessionStatus,
-  touchSessionActive,
   getSession,
 } from "../db.js";
 import { isPromptActive } from "../prompt.js";
+import { stopWatching } from "../git-watcher.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
+import { syncSessionActivity, clearSessionSyncState } from "../session-sync.js";
+import { detectAndInsertAgent } from "../agent-detector.js";
+export { clearSessionSyncState } from "../session-sync.js";
 
 const MAX_PAYLOAD_STRING_CHARS = 50_000;
-const SESSION_SYNC_INTERVAL_MS = 5_000;
 const TRUNCATED_SUFFIX = "…[truncated]";
-const sessionSyncState = new Map();
-
-/**
- * Remove sync state for a session. Called by the session delete handler
- * to prevent accumulating entries for sessions deleted via the UI
- * without firing the Stop hook.
- * @param {string} sessionId
- */
-export function clearSessionSyncState(sessionId) {
-  sessionSyncState.delete(sessionId);
-}
 
 function truncateString(value) {
   if (typeof value !== "string" || value.length <= MAX_PAYLOAD_STRING_CHARS) {
@@ -82,63 +71,6 @@ function stringifyPayload(value) {
       seen.add(current);
     }
     return current;
-  });
-}
-
-function syncSessionActivity(sessionId, projectDir) {
-  const now = Date.now();
-  const normalizedProjectDir = projectDir || "unknown";
-  const previous = sessionSyncState.get(sessionId);
-  const shouldFullSync =
-    !previous ||
-    (normalizedProjectDir !== "unknown" && previous.projectDir !== normalizedProjectDir);
-  const shouldPersistActivity =
-    shouldFullSync ||
-    !previous ||
-    now - previous.lastPersistedAt >= SESSION_SYNC_INTERVAL_MS;
-
-  if (!shouldPersistActivity) {
-    return;
-  }
-
-  if (shouldFullSync) {
-    upsertSession.run({
-      $id: sessionId,
-      $projectDir: normalizedProjectDir,
-      $worktreeDir: null,
-      $gitRoot: null,
-      $status: "active",
-      $model: null,
-      $currentClaudeSessionId: null,
-    });
-    sessionSyncState.set(sessionId, {
-      lastPersistedAt: now,
-      projectDir: normalizedProjectDir !== "unknown" ? normalizedProjectDir : previous?.projectDir ?? "unknown",
-    });
-    return;
-  }
-
-  const result = touchSessionActive.run({ $id: sessionId });
-  if (result.changes === 0) {
-    upsertSession.run({
-      $id: sessionId,
-      $projectDir: normalizedProjectDir,
-      $worktreeDir: null,
-      $gitRoot: null,
-      $status: "active",
-      $model: null,
-      $currentClaudeSessionId: null,
-    });
-    sessionSyncState.set(sessionId, {
-      lastPersistedAt: now,
-      projectDir: normalizedProjectDir !== "unknown" ? normalizedProjectDir : previous?.projectDir ?? "unknown",
-    });
-    return;
-  }
-
-  sessionSyncState.set(sessionId, {
-    lastPersistedAt: now,
-    projectDir: previous?.projectDir ?? normalizedProjectDir,
   });
 }
 
@@ -196,32 +128,7 @@ export default async function eventRoutes(fastify) {
 
     // Auto-detect Agent tool calls and create agent records
     if (body.toolName === "Agent" && body.payload) {
-      const input = body.payload.input ?? {};
-      const description = input.description || input.prompt?.slice(0, 120) || "Sub-agent";
-      const agentType = input.subagent_type || "general-purpose";
-      const prompt = input.prompt || null;
-
-      const { id: agentId } = insertAgent.get({
-        $sessionId: sessionId,
-        $eventId: eventId,
-        $description: description,
-        $agentType: agentType,
-        $prompt: prompt ? prompt.slice(0, 2000) : null,
-        $status: "completed",
-      });
-
-      broadcast({
-        type: "agent:new",
-        agent: {
-          id: agentId,
-          sessionId,
-          eventId,
-          description,
-          agentType,
-          status: "completed",
-          createdAt: new Date().toISOString(),
-        },
-      });
+      detectAndInsertAgent(sessionId, eventId, body.payload.input ?? {}, broadcast);
     }
 
     invalidateDashboardSnapshot();
@@ -309,17 +216,7 @@ export default async function eventRoutes(fastify) {
 
     // Auto-detect Agent tool calls
     if (toolName === "Agent") {
-      const description = toolInput.description || toolInput.prompt?.slice(0, 120) || "Sub-agent";
-      const agentType = toolInput.subagent_type || "general-purpose";
-      const prompt = toolInput.prompt || null;
-      const { id: agentId } = insertAgent.get({
-        $sessionId: sessionId, $eventId: eventId, $description: description,
-        $agentType: agentType, $prompt: prompt ? prompt.slice(0, 2000) : null, $status: "completed",
-      });
-      broadcast({
-        type: "agent:new",
-        agent: { id: agentId, sessionId, eventId, description, agentType, status: "completed", createdAt: new Date().toISOString() },
-      });
+      detectAndInsertAgent(sessionId, eventId, toolInput, broadcast);
     }
 
     invalidateDashboardSnapshot();
@@ -368,13 +265,14 @@ export default async function eventRoutes(fastify) {
     if (!rawId) return reply.code(200).send();
     const sessionId = lookupSessionId(rawId) || rawId;
     if (isPromptActive(sessionId)) return reply.code(200).send();
+    const session = getSession.get({ $id: sessionId });
     try {
       updateSessionStatus.run({ $id: sessionId, $status: "stopped" });
     } catch { /* session may not exist */ }
-    sessionSyncState.delete(sessionId);
+    stopWatching(sessionId, session?.worktree_dir || session?.project_dir);
+    clearSessionSyncState(sessionId);
     invalidateDashboardSnapshot();
-    const session = getSession.get({ $id: sessionId });
-    if (session) broadcast({ type: "session:updated", session });
+    if (session) broadcast({ type: "session:updated", session: getSession.get({ $id: sessionId }) });
     return reply.code(200).send();
   });
 

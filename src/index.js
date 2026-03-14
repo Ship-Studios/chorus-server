@@ -148,11 +148,13 @@ import craftingRoutes, { resetClient as resetCraftingClient } from "./routes/cra
 import directoryRoutes from "./routes/directories.js";
 
 /**
- * @see {@link ./routes/flint.js} — Mobey MCP proxy for /flint dashboard page.
- * Endpoints: `GET /api/flint/status`, `GET /api/flint/todos`.
- * Requires `MOBEY_API_KEY` env var.
+ * @see {@link ./routes/flint.js} — Mobey MCP proxy + AI executive assistant.
+ * Endpoints: GET /api/flint/status, /api/flint/ai-status, /api/flint/todos,
+ *             /api/flint/boards, POST /api/flint/chat (SSE streaming).
+ * Requires `MOBEY_API_KEY`; chat also requires `ANTHROPIC_API_KEY`.
+ * `resetClient`: Invalidates the cached Anthropic client (for VPN reconfiguration).
  */
-import flintRoutes from "./routes/flint.js";
+import flintRoutes, { resetClient as resetFlintClient } from "./routes/flint.js";
 
 /** @type {number} Server listen port, overridable via PORT env var. */
 const PORT = process.env.PORT ?? 3001;
@@ -288,6 +290,7 @@ app.post("/api/vpn/reconfigure", async () => {
   resetDiffSummaryClient();
   resetCommitClient();
   resetCraftingClient();
+  resetFlintClient();
   const result = await reconfigureVpn();
   return { ok: true, ...result };
 });

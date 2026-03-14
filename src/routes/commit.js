@@ -9,188 +9,24 @@
  *
  * @module routes/commit
  */
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { getSession, lookupSessionId } from "../db.js";
 import { runGit, buildStatSummary, parseDiffToFiles } from "@agent-dashboard/diff-panel/server";
 import { getAnthropicFetchOptions } from "../vpn.js";
 import { broadcastToSession } from "../broadcast.js";
 import { handleAnthropicError } from "../anthropic-error.js";
+import {
+  COMMIT_MSG_SYSTEM_PROMPT,
+  SUBMODULE_COMMIT_MSG_SYSTEM_PROMPT,
+  buildCommitPrompt,
+  buildSubmoduleCommitPrompt,
+} from "../commit-prompts.js";
+import { createBuildPreviewDiff, getDirtySubmodules } from "../commit-git.js";
+export { createBuildPreviewDiff } from "../commit-git.js";
 
 const MAX_DIFF_CHARS = 30_000;
 const MAX_SUBMODULE_DIFF_CHARS = 15_000;
-
-const COMMIT_MSG_SYSTEM_PROMPT =
-  "You generate git commit messages following the Conventional Commits format. " +
-  "Analyze the diff and produce a commit message with:\n" +
-  "- A type prefix: feat, fix, refactor, docs, chore, style, test, perf, ci, build\n" +
-  "- An optional scope in parentheses if changes are focused on a specific area\n" +
-  "- A concise subject line (under 72 characters) in imperative mood\n" +
-  "- An optional body (separated by a blank line) with 1-3 bullet points explaining key changes, only if the change is non-trivial\n" +
-  "Return ONLY the commit message text, no markdown formatting, no code fences, no explanation.";
-
-/**
- * Build the user prompt for single-repo commit message generation.
- *
- * @param {string} stat - The git stat summary.
- * @param {string} diff - The git diff content.
- * @returns {string} The formatted prompt.
- */
-function buildCommitPrompt(stat, diff) {
-  return (
-    "Generate a commit message for this diff.\n\n" +
-    `<stat>\n${stat}\n</stat>\n\n` +
-    `<diff>\n${diff}\n</diff>`
-  );
-}
-
-const SUBMODULE_COMMIT_MSG_SYSTEM_PROMPT =
-  "You generate git commit messages for a monorepo with submodules. " +
-  "You will receive diffs from multiple scopes (submodules + parent repo). " +
-  "Generate a SEPARATE commit message for each scope.\n\n" +
-  "Rules:\n" +
-  "- Each message follows Conventional Commits: type(scope): subject\n" +
-  "- Subject line under 72 characters, imperative mood\n" +
-  "- Optional body with 1-3 bullet points for non-trivial changes\n" +
-  "- The parent message should summarize the overall change and mention submodule updates\n\n" +
-  "Return a JSON object with keys matching the scope names, each value being the commit message string.\n" +
-  "Example: {\"packages/server\": \"feat: add VPN proxy support\", \"parent\": \"feat: VPN proxy support\"}\n" +
-  "Return ONLY the JSON object, no markdown, no code fences.";
-
-/**
- * Build the user prompt for monorepo/submodule commit message generation.
- *
- * @param {Array<{name: string, stat: string, diff: string}>} scopes - The list of scopes with their stats and diffs.
- * @returns {string} The formatted prompt.
- */
-function buildSubmoduleCommitPrompt(scopes) {
-  const parts = ["Generate a commit message for each of the following scopes.\n"];
-  for (const { name, stat, diff } of scopes) {
-    parts.push(`<scope name="${name}">\n<stat>\n${stat}\n</stat>\n<diff>\n${diff}\n</diff>\n</scope>\n`);
-  }
-  return parts.join("\n");
-}
-
-/**
- * Detect submodules with uncommitted changes.
- * Parses .gitmodules to find submodule paths, then checks each for dirty state.
- * Returns array of { path, absPath } for dirty submodules.
- *
- * @param {string} dir - The directory to check for submodules.
- * @param {Function} runGitFn - The function to run git commands.
- * @param {Function} existsSyncFn - The function to check if a file exists.
- * @returns {Promise<Array<{path: string, absPath: string}>>} A list of dirty submodules.
- */
-async function getDirtySubmodules(dir, runGitFn, existsSyncFn) {
-  if (!existsSyncFn(join(dir, ".gitmodules"))) {
-    return [];
-  }
-
-  let gitmodulesContent;
-  try {
-    gitmodulesContent = await runGitFn(dir, ["config", "--file", ".gitmodules", "--get-regexp", "^submodule\\..*\\.path$"]);
-  } catch {
-    return []; // No .gitmodules or no submodules
-  }
-
-  const submodules = [];
-  for (const line of gitmodulesContent.trim().split("\n")) {
-    const path = line.split(/\s+/)[1];
-    if (!path) continue;
-    // Guard against path traversal in .gitmodules — resolved path must stay within dir
-    const absPath = resolve(dir, path);
-    if (!absPath.startsWith(dir)) continue;
-    if (!existsSyncFn(absPath)) continue;
-
-    // Check if submodule has uncommitted changes.
-    // diff --quiet exits non-zero when changes exist; catch only that case.
-    try {
-      await runGitFn(absPath, ["diff", "--quiet", "HEAD"]);
-    } catch {
-      submodules.push({ path, absPath });
-      continue;
-    }
-    try {
-      await runGitFn(absPath, ["diff", "--cached", "--quiet"]);
-    } catch {
-      submodules.push({ path, absPath });
-      continue;
-    }
-    try {
-      const untracked = (await runGitFn(absPath, ["ls-files", "--others", "--exclude-standard"])).trim();
-      if (untracked) {
-        submodules.push({ path, absPath });
-      }
-    } catch {
-      // ls-files failure — skip rather than falsely reporting dirty
-    }
-  }
-  return submodules;
-}
-
-/**
- * Truncate the diff if it exceeds the maximum allowed length.
- *
- * @param {string} diff - The diff content to truncate.
- * @returns {string} The truncated diff.
- */
-function truncateDiff(diff) {
-  if (diff.length > MAX_DIFF_CHARS) {
-    return diff.slice(0, MAX_DIFF_CHARS) + "\n\n[diff truncated]";
-  }
-  return diff;
-}
-
-/**
- * Create a function to build a preview diff of all changes (staged + unstaged).
- *
- * @param {object} [deps={}] - Dependency overrides.
- * @returns {Function} The buildPreviewDiff function.
- */
-export function createBuildPreviewDiff(deps = {}) {
-  const {
-    runGit: runGitImpl = runGit,
-    existsSync: existsSyncImpl = existsSync,
-    copyFileSync: copyFileSyncImpl = copyFileSync,
-    mkdtempSync: mkdtempSyncImpl = mkdtempSync,
-    tmpdir: tmpdirImpl = tmpdir,
-    join: joinImpl = join,
-    resolve: resolveImpl = resolve,
-    rmSync: rmSyncImpl = rmSync,
-  } = deps;
-
-  return async function buildPreviewDiff(dir) {
-    const previewDir = mkdtempSyncImpl(joinImpl(tmpdirImpl(), "agent-dashboard-commit-"));
-    const previewIndexPath = joinImpl(previewDir, "index");
-
-    try {
-      const rawGitIndexPath = (await runGitImpl(dir, ["rev-parse", "--git-path", "index"])).trim();
-      const gitIndexPath = resolveImpl(dir, rawGitIndexPath);
-      if (existsSyncImpl(gitIndexPath)) copyFileSyncImpl(gitIndexPath, previewIndexPath);
-
-      const previewEnv = { GIT_INDEX_FILE: previewIndexPath };
-      await runGitImpl(dir, ["add", "-A"], { env: previewEnv });
-
-      try {
-        return await runGitImpl(
-          dir,
-          ["diff", "--cached", "HEAD", "--no-color", "--unified=3", "--submodule=diff"],
-          { env: previewEnv },
-        );
-      } catch {
-        return await runGitImpl(
-          dir,
-          ["diff", "--cached", "--no-color", "--unified=3", "--submodule=diff"],
-          { env: previewEnv },
-        );
-      }
-    } finally {
-      rmSyncImpl(previewDir, { recursive: true, force: true });
-    }
-  };
-}
 
 const buildPreviewDiff = createBuildPreviewDiff();
 
