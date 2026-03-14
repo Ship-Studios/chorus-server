@@ -27,7 +27,7 @@ import {
   getWorktree,
 } from "../db-adapter.js";
 import { lookupSessionId } from "../session-resolver.js";
-import { spawnSwarmAgent, cancelSwarmAgent, getActiveSwarmAgents } from "../prompt.js";
+import { spawnSwarmAgent, cancelSwarmAgent, getActiveSwarmAgents } from "../prompt-adapter.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
 import { invalidateDiscoveredWorktrees } from "../worktree-discovery.js";
 

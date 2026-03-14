@@ -366,3 +366,63 @@ export async function insertAlias(claudeSessionId, dashboardSessionId) {
   `;
   return { changes: result.count };
 }
+
+// ---------------------------------------------------------------------------
+// Conversation history (Agent SDK)
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrieves a conversation by its ID.
+ *
+ * @param {string} id
+ * @returns {Promise<object|null>}
+ */
+export async function getConversation(id) {
+  const [row] = await sql`SELECT * FROM conversations WHERE id = ${id}`;
+  return row ?? null;
+}
+
+/**
+ * Inserts or updates a conversation record.
+ * On conflict, updates messages, and uses COALESCE to avoid overwriting
+ * existing system_prompt, model, or total_tokens with NULL values.
+ *
+ * @param {{ id: string, messages: object[], systemPrompt?: string, model?: string, totalTokens?: number }} params
+ */
+export async function upsertConversation({ id, messages, systemPrompt, model, totalTokens }) {
+  await sql`
+    INSERT INTO conversations (id, messages, system_prompt, model, total_tokens)
+    VALUES (${id}, ${JSON.stringify(messages)}, ${systemPrompt ?? null}, ${model ?? null}, ${totalTokens ?? 0})
+    ON CONFLICT (id) DO UPDATE SET
+      messages = ${JSON.stringify(messages)},
+      system_prompt = COALESCE(${systemPrompt}, conversations.system_prompt),
+      model = COALESCE(${model}, conversations.model),
+      total_tokens = COALESCE(${totalTokens}, conversations.total_tokens),
+      updated_at = NOW()
+  `;
+}
+
+/**
+ * Appends new messages to an existing conversation's messages array.
+ * Uses JSONB concatenation operator (||) so the array grows atomically.
+ *
+ * @param {string} id
+ * @param {object[]} newMessages
+ */
+export async function appendMessages(id, newMessages) {
+  await sql`
+    UPDATE conversations SET
+      messages = conversations.messages || ${JSON.stringify(newMessages)}::jsonb,
+      updated_at = NOW()
+    WHERE id = ${id}
+  `;
+}
+
+/**
+ * Deletes a conversation by its ID.
+ *
+ * @param {string} id
+ */
+export async function deleteConversation(id) {
+  await sql`DELETE FROM conversations WHERE id = ${id}`;
+}

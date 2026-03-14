@@ -324,6 +324,42 @@ if (process.env.SUPABASE_DB_URL) {
   }
 
   // -------------------------------------------------------------------------
+  // Conversation history (Agent SDK)
+  // -------------------------------------------------------------------------
+
+  async function getConversation(id) {
+    return s.getConversationStmt.get({ $id: id }) ?? null;
+  }
+
+  async function upsertConversation({ id, messages, systemPrompt, model, totalTokens }) {
+    return s.upsertConversationStmt.run({
+      $id: id,
+      $messages: JSON.stringify(messages),
+      $systemPrompt: systemPrompt ?? null,
+      $model: model ?? null,
+      $totalTokens: totalTokens ?? 0,
+    });
+  }
+
+  async function appendMessages(id, newMessages) {
+    const row = s.getConversationStmt.get({ $id: id });
+    if (!row) return;
+    const existing = JSON.parse(row.messages || "[]");
+    existing.push(...newMessages);
+    s.upsertConversationStmt.run({
+      $id: id,
+      $messages: JSON.stringify(existing),
+      $systemPrompt: null,
+      $model: null,
+      $totalTokens: null,
+    });
+  }
+
+  async function deleteConversation(id) {
+    return s.deleteConversationStmt.run({ $id: id });
+  }
+
+  // -------------------------------------------------------------------------
   // Maintenance / cleanup
   // -------------------------------------------------------------------------
 
@@ -393,6 +429,10 @@ if (process.env.SUPABASE_DB_URL) {
     deduplicateSessions,
     reconcileOrphanedSessions,
     pruneOldData,
+    getConversation,
+    upsertConversation,
+    appendMessages,
+    deleteConversation,
   };
 }
 
@@ -450,4 +490,8 @@ export const {
   deduplicateSessions,
   reconcileOrphanedSessions,
   pruneOldData,
+  getConversation,
+  upsertConversation,
+  appendMessages,
+  deleteConversation,
 } = _impl;

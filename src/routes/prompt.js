@@ -30,7 +30,7 @@ import { randomUUID } from "node:crypto";
 import { broadcastToSession, debouncedDiffInvalidation } from "../broadcast.js";
 import { getSession } from "../db-adapter.js";
 import { lookupSessionId } from "../session-resolver.js";
-import { sendPrompt, cancelPrompt, isPromptActive } from "../prompt.js";
+import { sendPrompt, cancelPrompt, isPromptActive } from "../prompt-adapter.js";
 
 const PROMPT_BODY_LIMIT = 15 * 1024 * 1024;
 

@@ -147,6 +147,13 @@ import craftingRoutes, { resetClient as resetCraftingClient } from "./routes/cra
  */
 import directoryRoutes from "./routes/directories.js";
 
+/**
+ * @see {@link ./routes/bridge.js} — WebSocket bridge for local MCP server daemons.
+ * `initBridge()`: Creates the /bridge Socket.IO namespace after setIO() is called.
+ * Enables the Agent SDK to dispatch tool calls to local daemons and await results.
+ */
+import bridgeRoutes, { initBridge } from "./routes/bridge.js";
+
 
 /** @type {number} Server listen port, overridable via PORT env var. */
 const PORT = process.env.PORT ?? 3001;
@@ -297,6 +304,7 @@ await app.register(diffSummaryRoutes);  // POST/GET         /api/sessions/:id/di
 await app.register(commitRoutes);       // POST             /api/sessions/:id/commit
 await app.register(craftingRoutes);     // GET/POST/PUT/DELETE /api/craft/{agents,recipes}, POST /api/craft/synthesize
 await app.register(directoryRoutes);   // GET              /api/directories
+await app.register(bridgeRoutes);      // Socket.IO /bridge namespace (no HTTP routes)
 
 /**
  * Clean up duplicate sessions from prior TOCTOU races in resolveSessionId().
@@ -466,6 +474,10 @@ io = new SocketIO(app.server, {
   maxHttpBufferSize: 1_000_000,
 });
 setIO(io);
+
+// Initialise the /bridge namespace for local MCP daemon connections.
+// Must be called after setIO() so getIO() returns the live instance.
+initBridge();
 
 // Socket.IO auth middleware — reject unauthenticated connections when API key is set.
 if (DASHBOARD_API_KEY) {

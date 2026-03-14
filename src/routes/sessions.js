@@ -9,7 +9,7 @@ import {
   insertAlias,
 } from "../db-adapter.js";
 import { resolveSessionId, lookupSessionId } from "../session-resolver.js";
-import { isPromptActive, cancelPrompt, getActiveSwarmAgents, cancelSwarmAgent } from "../prompt.js";
+import { isPromptActive, cancelPrompt, getActiveSwarmAgents, cancelSwarmAgent } from "../prompt-adapter.js";
 import { startWatching, stopWatching } from "../git-watcher.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
 import { clearSessionSyncState } from "../session-sync.js";

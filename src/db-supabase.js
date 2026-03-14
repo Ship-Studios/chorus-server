@@ -34,6 +34,10 @@ export {
   getRecentEventsSlim,
   getAlias,
   insertAlias,
+  getConversation,
+  upsertConversation,
+  appendMessages,
+  deleteConversation,
 } from "./db-pg.js";
 
 // Agents + worktrees + crafting + maintenance

@@ -42,7 +42,7 @@ import {
   getSession,
 } from "../db-adapter.js";
 import { resolveSessionId, lookupSessionId } from "../session-resolver.js";
-import { isPromptActive } from "../prompt.js";
+import { isPromptActive } from "../prompt-adapter.js";
 import { stopWatching } from "../git-watcher.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
 import { syncSessionActivity, clearSessionSyncState } from "../session-sync.js";

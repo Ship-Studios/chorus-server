@@ -135,7 +135,21 @@ if (!sessionColumns.some((column) => column.name === "git_root")) {
   db.exec("ALTER TABLE sessions ADD COLUMN git_root TEXT");
 }
 
+// Conversation history for Agent SDK sessions (replaces CLI --resume mechanism).
 db.exec(`
+  CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    messages TEXT NOT NULL DEFAULT '[]',
+    system_prompt TEXT,
+    model TEXT,
+    total_tokens INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_sessions_status_started_at ON sessions(status, started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_sessions_project_status_last_seen ON sessions(project_dir, status, last_seen_at DESC);
@@ -589,5 +603,27 @@ export function pruneOldData() {
     sessionsDeleted: sessionsResult.changes,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Conversation history (Agent SDK)
+// ---------------------------------------------------------------------------
+
+/** Retrieves a single conversation by its ID. */
+export const getConversationStmt = db.prepare(`SELECT * FROM conversations WHERE id = $id`);
+
+/** Inserts or updates a conversation record. */
+export const upsertConversationStmt = db.prepare(`
+  INSERT INTO conversations (id, messages, system_prompt, model, total_tokens)
+  VALUES ($id, $messages, $systemPrompt, $model, $totalTokens)
+  ON CONFLICT(id) DO UPDATE SET
+    messages = $messages,
+    system_prompt = COALESCE($systemPrompt, conversations.system_prompt),
+    model = COALESCE($model, conversations.model),
+    total_tokens = COALESCE($totalTokens, conversations.total_tokens),
+    updated_at = datetime('now')
+`);
+
+/** Deletes a conversation by its ID. */
+export const deleteConversationStmt = db.prepare(`DELETE FROM conversations WHERE id = $id`);
 
 export default db;
