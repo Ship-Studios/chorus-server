@@ -167,7 +167,7 @@ export function initBridge() {
 
     // ── prompt_chunk ─────────────────────────────────────────────────────────
     socket.on("prompt_chunk", ({ instanceId, sessionId, chunk } = {}) => {
-      if (!sessionId || !chunk) return;
+      if (!sessionId || !chunk || !instanceId) return;
 
       // Update activity timestamp and reset timeout — the daemon is alive
       if (instanceId) {
@@ -183,7 +183,7 @@ export function initBridge() {
 
     // ── prompt_done ──────────────────────────────────────────────────────────
     socket.on("prompt_done", async ({ instanceId, sessionId, exitCode, error, cancelled, freshSession, worktreeStats, description, sdkSessionId } = {}) => {
-      if (!sessionId) return;
+      if (!sessionId || !instanceId) return;
 
       // Persist the Agent SDK session ID for future resume — fire-and-forget,
       // it's only needed on the next prompt so it doesn't block the done broadcast.
