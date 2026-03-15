@@ -46,6 +46,7 @@ import {
   setCachedDiff,
   setInflightDiff,
 } from "../diff-cache.js";
+import { executeRemoteTool, isBridgeConnected } from "./bridge.js";
 
 const MAX_FILES_DEFAULT = 200;
 const MAX_FILES_CAP = 500;
@@ -76,15 +77,23 @@ export function createDiffRoutes(deps = {}) {
         return reply.code(400).send({ error: "Session has no known working directory" });
       }
 
-      if (!existsSyncImpl(dir)) {
-        return reply.code(400).send({ error: `Working directory no longer exists: ${dir}` });
-      }
-
       // Parse maxFiles query param — default 200, hard cap 500
       const rawMax = parseInt(req.query.maxFiles, 10);
       const maxFiles = Number.isFinite(rawMax) && rawMax > 0
         ? Math.min(rawMax, MAX_FILES_CAP)
         : MAX_FILES_DEFAULT;
+
+      // Directory doesn't exist locally (e.g. server deployed on Railway) —
+      // try routing through the bridge to the user's local agent.
+      if (!existsSyncImpl(dir)) {
+        if (!isBridgeConnected(dir)) {
+          return reply.code(400).send({ error: `Working directory no longer exists: ${dir}` });
+        }
+        return computeBridgeDiff(dir, req.params.sessionId, maxFiles, req, reply, {
+          buildStatSummary: buildStatSummaryImpl,
+          parseDiffToFiles: parseDiffToFilesImpl,
+        });
+      }
 
       // Parse optional file filter — bypasses cache entirely when present
       const filesParam = req.query.files;
@@ -239,9 +248,12 @@ async function materializeDiffResult(dir, result, deps) {
   result.materializePromise = (async () => {
     const [files, branch] = await Promise.all([
       Promise.resolve(parseDiffToFilesImpl(result.rawDiff)),
-      result.hasHead
-        ? runGitImpl(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).then((value) => value.trim()).catch(() => "unknown")
-        : Promise.resolve("unknown"),
+      // Use pre-fetched branch (from bridge) when available; otherwise run git locally
+      result.branch
+        ? Promise.resolve(result.branch)
+        : result.hasHead && runGitImpl
+          ? runGitImpl(dir, ["rev-parse", "--abbrev-ref", "HEAD"]).then((value) => value.trim()).catch(() => "unknown")
+          : Promise.resolve("unknown"),
     ]);
     const materialized = {
       directory: dir,
@@ -300,6 +312,58 @@ async function computeDiffBase(dir, deps) {
  * @param {object} deps - Dependency bag.
  * @returns {Promise<object>} The diff response object.
  */
+/**
+ * Compute a diff by routing through the local agent bridge.
+ * Used when the working directory doesn't exist on the server (remote deployment).
+ */
+async function computeBridgeDiff(dir, sessionId, maxFiles, req, reply, deps) {
+  const { buildStatSummary: buildStatSummaryImpl, parseDiffToFiles: parseDiffToFilesImpl } = deps;
+
+  const cached = getCachedDiff(dir);
+  if (cached) {
+    return sendDiffResult(dir, cached, sessionId, maxFiles, req, reply, {
+      buildStatSummary: buildStatSummaryImpl,
+      parseDiffToFiles: parseDiffToFilesImpl,
+    });
+  }
+
+  const inflight = getInflightDiff(dir);
+  if (inflight) {
+    const result = await inflight;
+    return sendDiffResult(dir, result, sessionId, maxFiles, req, reply, {
+      buildStatSummary: buildStatSummaryImpl,
+      parseDiffToFiles: parseDiffToFilesImpl,
+    });
+  }
+
+  const promise = (async () => {
+    const bridgeResult = await executeRemoteTool(dir, "git_diff", {
+      cwd: dir,
+      raw: true,
+    });
+    const rawDiff = bridgeResult.rawDiff ?? "";
+    return {
+      directory: dir,
+      branch: bridgeResult.branch ?? "unknown",
+      hasHead: bridgeResult.hasHead ?? true,
+      rawDiff,
+      _diffHash: createHash("sha256").update(rawDiff).digest("hex"),
+    };
+  })();
+
+  setInflightDiff(dir, promise);
+  try {
+    const result = await promise;
+    setCachedDiff(dir, result);
+    return sendDiffResult(dir, result, sessionId, maxFiles, req, reply, {
+      buildStatSummary: buildStatSummaryImpl,
+      parseDiffToFiles: parseDiffToFilesImpl,
+    });
+  } finally {
+    clearInflightDiff(dir);
+  }
+}
+
 async function computeFilteredDiff(dir, fileFilter, sessionId, maxFiles, reply, deps) {
   const {
     buildStatSummary: buildStatSummaryImpl,

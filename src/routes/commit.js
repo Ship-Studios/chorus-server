@@ -88,7 +88,16 @@ export function createCommitRoutes(deps = {}) {
         return reply.code(400).send({ error: "Session has no known working directory" });
       }
       if (!existsSyncImpl(dir)) {
-        return reply.code(400).send({ error: `Working directory no longer exists: ${dir}` });
+        // Directory doesn't exist locally — try bridge-based commit
+        let bridgeAvailable = false;
+        try {
+          const { isBridgeConnected: isBridgeConnectedImpl } = await import("./bridge.js");
+          bridgeAvailable = isBridgeConnectedImpl(dir);
+        } catch { /* bridge module not available in tests */ }
+        if (!bridgeAvailable) {
+          return reply.code(400).send({ error: `Working directory no longer exists: ${dir}` });
+        }
+        return bridgeCommit(dir, sessionId, anthropic, AnthropicImpl, getAnthropicFetchOptionsImpl, broadcastToSessionImpl, reply);
       }
 
       // ── Detect dirty submodules BEFORE the preview diff ────────────
@@ -331,3 +340,65 @@ export function createCommitRoutes(deps = {}) {
 }
 
 export default createCommitRoutes();
+
+// ---------------------------------------------------------------------------
+// Bridge-based commit for remote deployments
+// ---------------------------------------------------------------------------
+
+/**
+ * Simplified commit flow when the working directory only exists on the
+ * user's machine (bridge-connected). Gets the diff via bridge, generates
+ * the commit message on the server, then commits via bridge bash_exec.
+ */
+async function bridgeCommit(dir, sessionId, anthropic, AnthropicImpl, getAnthropicFetchOptionsImpl, broadcastToSessionImpl, reply) {
+  const { executeRemoteTool } = await import("./bridge.js");
+
+  try {
+    // Get diff via bridge
+    const diffResult = await executeRemoteTool(dir, "git_diff", { cwd: dir, raw: true });
+    const rawDiff = diffResult.rawDiff ?? "";
+
+    if (!rawDiff.trim()) {
+      return reply.code(400).send({ error: "No changes to commit" });
+    }
+
+    // Truncate for AI
+    const truncatedDiff = rawDiff.length > MAX_DIFF_CHARS
+      ? rawDiff.slice(0, MAX_DIFF_CHARS) + "\n\n[diff truncated]"
+      : rawDiff;
+
+    // Generate commit message via Anthropic API (runs on server)
+    const model = process.env.DIFF_SUMMARY_MODEL ?? "claude-haiku-4-5-20251001";
+    const aiClient = anthropic || getClient(AnthropicImpl, getAnthropicFetchOptionsImpl);
+    if (!aiClient) {
+      return reply.code(503).send({ error: "ANTHROPIC_API_KEY not configured" });
+    }
+
+    const response = await aiClient.messages.create({
+      model,
+      max_tokens: 300,
+      system: COMMIT_MSG_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: buildCommitPrompt(truncatedDiff, "") }],
+    });
+
+    const commitMessage = response.content?.[0]?.text?.trim() || "chore: update";
+
+    // Commit via bridge bash_exec
+    const commitResult = await executeRemoteTool(dir, "bash_exec", {
+      command: `cd "${dir}" && git add -A && git commit -m ${JSON.stringify(commitMessage)}`,
+      cwd: dir,
+    });
+
+    broadcastToSessionImpl(sessionId, { type: "diff:invalidated", sessionId });
+
+    return {
+      ok: true,
+      message: commitMessage,
+      stat: commitResult.stdout || "",
+      filesChanged: 0,
+    };
+  } catch (err) {
+    if (handleAnthropicError(err, reply)) return;
+    return reply.code(500).send({ error: `Commit failed: ${err.message}` });
+  }
+}

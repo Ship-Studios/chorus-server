@@ -65,6 +65,25 @@ export function broadcast(message) {
   }
 }
 
+// --- Broadcast interceptors ---
+// Modules can register callbacks to observe messages passing through
+// broadcastToSession without modifying bridge.js or other emitters.
+/** @type {Set<(sessionId: string, message: object) => void>} */
+const broadcastInterceptors = new Set();
+
+/**
+ * Register a callback that is invoked every time `broadcastToSession` fires.
+ * Used by prompt-adapter.js to clean up tracking maps when bridge lifecycle
+ * events (prompt:done, swarm:done) arrive.
+ *
+ * @param {(sessionId: string, message: object) => void} fn
+ * @returns {() => void} Unregister function
+ */
+export function onBroadcastToSession(fn) {
+  broadcastInterceptors.add(fn);
+  return () => broadcastInterceptors.delete(fn);
+}
+
 /**
  * Broadcasts a message only to clients subscribed to a specific session room.
  * Used for session-specific events like prompt:*, swarm:*, diff:*, worktree:*.
@@ -73,6 +92,10 @@ export function broadcast(message) {
  * @param {object} message - The message object to broadcast.
  */
 export function broadcastToSession(sessionId, message) {
+  // Notify interceptors (fire-and-forget, errors logged but swallowed)
+  for (const fn of broadcastInterceptors) {
+    try { fn(sessionId, message); } catch (_) { /* swallow */ }
+  }
   if (message?.type === "diff:invalidated") {
     invalidateSessionDiffCache(sessionId || message.sessionId).catch(() => {});
   }

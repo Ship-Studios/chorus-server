@@ -7,13 +7,26 @@
  * daemon and await the result, enabling the Agent SDK to interact with the
  * user's local filesystem without direct access.
  *
+ * The bridge also relays prompt and swarm lifecycle events between daemons and
+ * UI clients. When the Agent SDK runs on the local-agent rather than the
+ * server, the server acts as a relay — dispatching prompt_start/swarm_start
+ * to the daemon and forwarding chunk/done events back to the UI.
+ *
  * Protocol (daemon → server):
- *   connect     handshake.auth.token must equal DASHBOARD_API_KEY (if set)
- *   register    { projects: string[], mode: "read-only"|"read-write"|"full" }
- *   tool_result { requestId: string, result?: object, error?: string }
+ *   connect       handshake.auth.token must equal DASHBOARD_API_KEY (if set)
+ *   register      { projects: string[], mode: "read-only"|"read-write"|"full" }
+ *   tool_result   { requestId: string, result?: object, error?: string }
+ *   prompt_chunk  { requestId: string, sessionId: string, chunk: object }
+ *   prompt_done   { requestId: string, sessionId: string, exitCode, error?, cancelled?, freshSession? }
+ *   swarm_chunk   { requestId: string, agentId: string, parentSessionId: string, chunk: object }
+ *   swarm_done    { requestId: string, agentId: string, parentSessionId: string, exitCode, error?, cancelled?, description?, worktreeStats? }
  *
  * Protocol (server → daemon):
- *   tool_call   { requestId: string, toolName: string, toolInput: object }
+ *   tool_call     { requestId: string, toolName: string, toolInput: object }
+ *   prompt_start  { requestId: string, sessionId: string, prompt: string, cwd: string, permissionMode?: string, model?: string, image?: object }
+ *   prompt_cancel { requestId: string }
+ *   swarm_start   { requestId: string, agentId: string, parentSessionId: string, prompt: string, cwd: string, description?: string, permissionMode?: string, model?: string, useWorktree?: boolean, image?: object }
+ *   swarm_cancel  { agentId: string }
  *
  * WebSocket broadcasts (→ main "/" namespace, UI clients):
  *   bridge:connected    { projects, mode }
@@ -24,6 +37,15 @@
 
 import { randomUUID } from "node:crypto";
 import { getIO } from "../socket.js";
+import { broadcastToSession, debouncedDiffInvalidation } from "../broadcast.js";
+import {
+  insertWorktree,
+  updateWorktreeStats,
+  updateWorktreeConflicts,
+  getWorktree,
+} from "../db-adapter.js";
+import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
+import { invalidateDiscoveredWorktrees } from "../worktree-discovery.js";
 
 // ---------------------------------------------------------------------------
 // Bridge state
@@ -46,6 +68,23 @@ const bridgeConnections = new Map();
  * @type {Map<string, { resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout> }>}
  */
 const pendingToolCalls = new Map();
+
+/**
+ * Active bridge-relayed prompts.
+ * Keyed by requestId — tracks which session the prompt belongs to so we can
+ * clean up on daemon disconnect.
+ *
+ * @type {Map<string, { sessionId: string, startedAt: number, socket: import("socket.io").Socket, imagePath?: string }>}
+ */
+const activeBridgePrompts = new Map();
+
+/**
+ * Active bridge-relayed swarm agents.
+ * Keyed by agentId — tracks which parent session the swarm agent belongs to.
+ *
+ * @type {Map<string, { parentSessionId: string, startedAt: number, socket: import("socket.io").Socket }>}
+ */
+const activeBridgeSwarms = new Map();
 
 // ---------------------------------------------------------------------------
 // Namespace initialisation (called from index.js after setIO())
@@ -130,6 +169,100 @@ export function initBridge() {
       }
     });
 
+    // ── prompt_chunk ─────────────────────────────────────────────────────────
+    socket.on("prompt_chunk", ({ requestId, sessionId, chunk } = {}) => {
+      if (!sessionId || !chunk) return;
+      broadcastToSession(sessionId, { type: "prompt:chunk", sessionId, chunk });
+    });
+
+    // ── prompt_done ──────────────────────────────────────────────────────────
+    socket.on("prompt_done", ({ requestId, sessionId, exitCode, error, cancelled, freshSession } = {}) => {
+      if (!sessionId) return;
+
+      broadcastToSession(sessionId, {
+        type: "prompt:done",
+        sessionId,
+        exitCode: exitCode ?? null,
+        cancelled: cancelled || false,
+        error: error || undefined,
+        freshSession: freshSession || false,
+      });
+
+      debouncedDiffInvalidation(sessionId);
+
+      // Clean up tracking state and temp image if any
+      if (requestId) {
+        const entry = activeBridgePrompts.get(requestId);
+        if (entry?.imagePath) {
+          import("node:fs/promises").then(({ unlink }) => unlink(entry.imagePath).catch(() => {}));
+        }
+        activeBridgePrompts.delete(requestId);
+      }
+    });
+
+    // ── swarm_chunk ──────────────────────────────────────────────────────────
+    socket.on("swarm_chunk", ({ requestId, agentId, parentSessionId, chunk } = {}) => {
+      if (!parentSessionId || !chunk) return;
+      broadcastToSession(parentSessionId, { type: "swarm:chunk", agentId, parentSessionId, chunk });
+    });
+
+    // ── swarm_done ───────────────────────────────────────────────────────────
+    socket.on("swarm_done", async ({ requestId, agentId, parentSessionId, exitCode, error, cancelled, description, worktreeStats } = {}) => {
+      if (!parentSessionId) return;
+
+      // If the swarm agent produced worktree stats, persist to DB
+      if (worktreeStats) {
+        try {
+          const wt = worktreeStats;
+          const status = wt.filesChanged > 0 ? "ready" : "empty";
+
+          const { id: worktreeDbId } = await insertWorktree({
+            sessionId: parentSessionId,
+            branchName: wt.branchName,
+            baseBranch: wt.baseBranch,
+            description: description || "",
+            agentId: agentId,
+            status,
+          });
+
+          await updateWorktreeStats(worktreeDbId, {
+            filesChanged: wt.filesChanged,
+            insertions: wt.insertions,
+            deletions: wt.deletions,
+            diffStat: wt.diffStat,
+            status,
+          });
+
+          if (wt.conflictInfo) {
+            await updateWorktreeConflicts(worktreeDbId, wt.conflictInfo);
+          }
+
+          invalidateDiscoveredWorktrees(wt.projectDir || parentSessionId);
+          invalidateDashboardSnapshot();
+          const worktreeRow = await getWorktree(worktreeDbId);
+          broadcastToSession(parentSessionId, { type: "worktree:ready", worktree: worktreeRow, parentSessionId });
+        } catch (err) {
+          console.error(`[bridge] failed to persist worktree for swarm agent ${agentId}:`, err);
+        }
+      }
+
+      broadcastToSession(parentSessionId, {
+        type: "swarm:done",
+        agentId,
+        parentSessionId,
+        exitCode: exitCode ?? null,
+        cancelled: cancelled || false,
+        description: description || undefined,
+        error: error || undefined,
+      });
+
+      debouncedDiffInvalidation(parentSessionId);
+
+      if (agentId) {
+        activeBridgeSwarms.delete(agentId);
+      }
+    });
+
     // ── disconnect ────────────────────────────────────────────────────────────
     socket.on("disconnect", (reason) => {
       console.log(`[bridge] local daemon disconnected (${reason}): ${socket.id}`);
@@ -151,6 +284,36 @@ export function initBridge() {
         clearTimeout(pending.timer);
         pendingToolCalls.delete(requestId);
         pending.reject(new Error("Local daemon disconnected before tool call completed"));
+      }
+
+      // Notify UI about orphaned bridge prompts from this socket
+      for (const [requestId, entry] of activeBridgePrompts) {
+        if (entry.socket === socket) {
+          broadcastToSession(entry.sessionId, {
+            type: "prompt:done",
+            sessionId: entry.sessionId,
+            exitCode: null,
+            error: "Local agent disconnected",
+            cancelled: false,
+            freshSession: false,
+          });
+          activeBridgePrompts.delete(requestId);
+        }
+      }
+
+      // Notify UI about orphaned bridge swarm agents from this socket
+      for (const [agentId, entry] of activeBridgeSwarms) {
+        if (entry.socket === socket) {
+          broadcastToSession(entry.parentSessionId, {
+            type: "swarm:done",
+            agentId,
+            parentSessionId: entry.parentSessionId,
+            exitCode: null,
+            error: "Local agent disconnected",
+            cancelled: false,
+          });
+          activeBridgeSwarms.delete(agentId);
+        }
       }
 
       if (registeredProjects.length > 0) {
@@ -258,6 +421,122 @@ export function getBridgeStatus() {
   }
 
   return Array.from(bySocket.values());
+}
+
+// ---------------------------------------------------------------------------
+// Prompt / Swarm relay — dispatch to daemon and track active operations
+// ---------------------------------------------------------------------------
+
+/**
+ * Dispatch a prompt to the local daemon connected for the given project.
+ * The daemon will run the Agent SDK locally and stream chunk/done events back.
+ *
+ * @param {string} projectDir - Project directory to route the prompt to
+ * @param {object} payload - Prompt payload
+ * @param {string} payload.requestId - Unique request ID for correlation
+ * @param {string} payload.sessionId - Dashboard session ID
+ * @param {string} payload.prompt - The user's prompt text
+ * @param {string} payload.cwd - Working directory for the prompt
+ * @param {string} [payload.permissionMode] - Permission mode
+ * @param {string} [payload.model] - Model override
+ * @param {object} [payload.image] - Optional image attachment { data, mimeType }
+ * @param {string} [payload.imagePath] - Temp image file path to clean up on done
+ * @returns {string} The requestId
+ * @throws {Error} If no bridge daemon is connected for this project
+ */
+export function dispatchPromptToBridge(projectDir, payload) {
+  const socket = findBridgeForProject(projectDir);
+  if (!socket) {
+    throw new Error(`No local agent connected for ${projectDir}`);
+  }
+
+  const { requestId, sessionId, imagePath, ...rest } = payload;
+
+  activeBridgePrompts.set(requestId, {
+    sessionId,
+    startedAt: Date.now(),
+    socket,
+    imagePath: imagePath || undefined,
+  });
+
+  socket.emit("prompt_start", { requestId, sessionId, ...rest });
+  return requestId;
+}
+
+/**
+ * Cancel an active bridge-relayed prompt.
+ *
+ * @param {string} requestId - The request ID of the prompt to cancel
+ * @returns {boolean} True if the prompt was found and cancel was sent
+ */
+export function cancelBridgePrompt(requestId) {
+  const entry = activeBridgePrompts.get(requestId);
+  if (!entry) return false;
+
+  entry.socket.emit("prompt_cancel", { requestId });
+  return true;
+}
+
+/**
+ * Check whether a bridge-relayed prompt is active for the given session.
+ *
+ * @param {string} sessionId - Dashboard session ID
+ * @returns {boolean}
+ */
+export function isBridgePromptActive(sessionId) {
+  for (const entry of activeBridgePrompts.values()) {
+    if (entry.sessionId === sessionId) return true;
+  }
+  return false;
+}
+
+/**
+ * Dispatch a swarm agent spawn to the local daemon.
+ *
+ * @param {string} projectDir - Project directory to route to
+ * @param {object} payload - Swarm spawn payload
+ * @param {string} payload.agentId - Unique agent ID
+ * @param {string} payload.parentSessionId - Parent dashboard session ID
+ * @param {string} payload.prompt - Agent prompt
+ * @param {string} payload.cwd - Working directory
+ * @param {string} [payload.description] - Agent description
+ * @param {string} [payload.permissionMode] - Permission mode
+ * @param {string} [payload.model] - Model override
+ * @param {boolean} [payload.useWorktree] - Whether to use git worktree isolation
+ * @param {object} [payload.image] - Optional image attachment
+ * @returns {string} The agentId
+ * @throws {Error} If no bridge daemon is connected for this project
+ */
+export function dispatchSwarmToBridge(projectDir, payload) {
+  const socket = findBridgeForProject(projectDir);
+  if (!socket) {
+    throw new Error(`No local agent connected for ${projectDir}`);
+  }
+
+  const { agentId, parentSessionId, ...rest } = payload;
+
+  activeBridgeSwarms.set(agentId, {
+    parentSessionId,
+    startedAt: Date.now(),
+    socket,
+  });
+
+  socket.emit("swarm_start", { agentId, parentSessionId, ...rest });
+  return agentId;
+}
+
+/**
+ * Cancel an active bridge-relayed swarm agent.
+ *
+ * @param {string} agentId - The agent ID to cancel
+ * @returns {boolean} True if the agent was found and cancel was sent
+ */
+export function cancelBridgeSwarm(agentId) {
+  const entry = activeBridgeSwarms.get(agentId);
+  if (!entry) return false;
+
+  entry.socket.emit("swarm_cancel", { agentId });
+  return true;
 }
 
 // ---------------------------------------------------------------------------

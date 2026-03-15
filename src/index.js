@@ -319,7 +319,11 @@ await app.register(bridgeRoutes);      // Socket.IO /bridge namespace (no HTTP r
  * and both create new sessions before seeing the other's row. Safe to run on
  * every startup — idempotent dedup that keeps the most recently seen session.
  */
-await deduplicateSessions();
+try {
+  await deduplicateSessions();
+} catch (err) {
+  app.log.warn(`[startup] deduplicateSessions failed (non-fatal): ${err.message}`);
+}
 
 // Load DB settings into process.env (env vars take precedence)
 try {
@@ -338,9 +342,13 @@ try {
 
 // Orphan reconciliation — mark active sessions as stopped if they haven't
 // been seen in 30 minutes (likely orphaned by a prior server crash).
-const orphaned = await reconcileOrphanedSessions();
-if (orphaned > 0) {
-  app.log.info(`[startup] Marked ${orphaned} orphaned session(s) as stopped`);
+try {
+  const orphaned = await reconcileOrphanedSessions();
+  if (orphaned > 0) {
+    app.log.info(`[startup] Marked ${orphaned} orphaned session(s) as stopped`);
+  }
+} catch (err) {
+  app.log.warn(`[startup] reconcileOrphanedSessions failed (non-fatal): ${err.message}`);
 }
 
 // Data retention — prune old events/sessions on startup and every 24 hours.
