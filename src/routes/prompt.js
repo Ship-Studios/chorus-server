@@ -71,7 +71,8 @@ export default async function promptRoutes(fastify) {
       cwd,
       permissionMode: permissionMode || undefined,
       model: session.model || undefined,
-      claudeSessionId: session.current_claude_session_id || undefined,
+      // NOTE: claudeSessionId intentionally omitted — each instanceId is a fresh
+      // Agent SDK query. Resume is not supported in the bridge architecture.
       description: description || undefined,
       useWorktree: useWorktree || undefined,
     };

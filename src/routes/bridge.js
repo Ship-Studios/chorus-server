@@ -68,11 +68,18 @@ const pendingToolCalls = new Map();
 /**
  * Active bridge-relayed prompts.
  * Keyed by instanceId — tracks which session the prompt belongs to so we can
- * clean up on daemon disconnect.
+ * clean up on daemon disconnect or timeout.
  *
- * @type {Map<string, { sessionId: string, startedAt: number, socket: import("socket.io").Socket, imagePath?: string }>}
+ * `lastActivity` is updated on every `prompt_chunk` so the timeout is
+ * activity-based rather than wall-clock: a long-running agent that streams
+ * actively won't be killed.
+ *
+ * @type {Map<string, { sessionId: string, startedAt: number, lastActivity: number, socket: import("socket.io").Socket, imagePath?: string, timeoutTimer?: ReturnType<typeof setTimeout> }>}
  */
 const activeBridgePrompts = new Map();
+
+/** How long (ms) a bridge prompt may be silent before we emit a synthetic error. */
+const BRIDGE_PROMPT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 // ---------------------------------------------------------------------------
 // Namespace initialisation (called from index.js after setIO())
@@ -160,6 +167,16 @@ export function initBridge() {
     // ── prompt_chunk ─────────────────────────────────────────────────────────
     socket.on("prompt_chunk", ({ instanceId, sessionId, chunk } = {}) => {
       if (!sessionId || !chunk) return;
+
+      // Update activity timestamp and reset timeout — the daemon is alive
+      if (instanceId) {
+        const entry = activeBridgePrompts.get(instanceId);
+        if (entry) {
+          entry.lastActivity = Date.now();
+          resetPromptTimeout(instanceId, entry);
+        }
+      }
+
       broadcastToSession(sessionId, { type: "prompt:chunk", sessionId, instanceId, chunk });
     });
 
@@ -215,11 +232,14 @@ export function initBridge() {
 
       debouncedDiffInvalidation(sessionId);
 
-      // Clean up tracking state and temp image if any
+      // Clean up tracking state, timeout timer, and temp image
       if (instanceId) {
         const entry = activeBridgePrompts.get(instanceId);
-        if (entry?.imagePath) {
-          import("node:fs/promises").then(({ unlink }) => unlink(entry.imagePath).catch(() => {}));
+        if (entry) {
+          if (entry.timeoutTimer) clearTimeout(entry.timeoutTimer);
+          if (entry.imagePath) {
+            import("node:fs/promises").then(({ unlink }) => unlink(entry.imagePath).catch(() => {}));
+          }
         }
         activeBridgePrompts.delete(instanceId);
       }
@@ -251,6 +271,8 @@ export function initBridge() {
       // Notify UI about orphaned bridge prompts from this socket
       for (const [instanceId, entry] of activeBridgePrompts) {
         if (entry.socket === socket) {
+          if (entry.timeoutTimer) clearTimeout(entry.timeoutTimer);
+          console.warn(`[bridge] orphaned prompt ${instanceId} for session ${entry.sessionId} — daemon disconnected after ${Math.round((Date.now() - entry.startedAt) / 1000)}s`);
           broadcastToSession(entry.sessionId, {
             type: "prompt:done",
             sessionId: entry.sessionId,
@@ -399,16 +421,60 @@ export function dispatchPromptToBridge(projectDir, payload) {
   }
 
   const { instanceId, sessionId, imagePath, ...rest } = payload;
+  const now = Date.now();
 
-  activeBridgePrompts.set(instanceId, {
+  const entry = {
     sessionId,
-    startedAt: Date.now(),
+    startedAt: now,
+    lastActivity: now,
     socket,
     imagePath: imagePath || undefined,
-  });
+    timeoutTimer: undefined,
+  };
+  activeBridgePrompts.set(instanceId, entry);
 
+  // Start the activity timeout — will fire if daemon goes silent
+  resetPromptTimeout(instanceId, entry);
+
+  console.log(`[bridge] dispatching prompt ${instanceId} for session ${sessionId} to daemon ${socket.id} (cwd: ${rest.cwd || projectDir})`);
   socket.emit("prompt_start", { instanceId, sessionId, ...rest });
   return instanceId;
+}
+
+/**
+ * (Re)start the inactivity timeout for a bridge prompt.
+ * If no `prompt_chunk` or `prompt_done` arrives within BRIDGE_PROMPT_TIMEOUT_MS,
+ * emit a synthetic `prompt:done` with an error so the UI isn't stuck forever.
+ *
+ * @param {string} instanceId
+ * @param {{ sessionId: string, startedAt: number, lastActivity: number, timeoutTimer?: ReturnType<typeof setTimeout> }} entry
+ */
+function resetPromptTimeout(instanceId, entry) {
+  if (entry.timeoutTimer) clearTimeout(entry.timeoutTimer);
+  entry.timeoutTimer = setTimeout(() => {
+    // Only fire if the entry is still tracked (not already completed/cleaned up)
+    if (!activeBridgePrompts.has(instanceId)) return;
+
+    const silentSec = Math.round((Date.now() - entry.lastActivity) / 1000);
+    const totalSec = Math.round((Date.now() - entry.startedAt) / 1000);
+    console.error(`[bridge] prompt ${instanceId} timed out — no activity for ${silentSec}s (total ${totalSec}s). Emitting synthetic prompt:done.`);
+
+    broadcastToSession(entry.sessionId, {
+      type: "prompt:done",
+      sessionId: entry.sessionId,
+      instanceId,
+      exitCode: null,
+      error: `Bridge prompt timed out — no response from local agent for ${silentSec}s`,
+      cancelled: false,
+      freshSession: false,
+    });
+
+    // Clean up
+    if (entry.imagePath) {
+      import("node:fs/promises").then(({ unlink }) => unlink(entry.imagePath).catch(() => {}));
+    }
+    activeBridgePrompts.delete(instanceId);
+  }, BRIDGE_PROMPT_TIMEOUT_MS);
 }
 
 /**
