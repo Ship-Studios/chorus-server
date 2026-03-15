@@ -28,7 +28,6 @@ bun src/index.js
 | `DASHBOARD_API_KEY` | -- | Optional Bearer token guard for `/api/` endpoints |
 | `SUPABASE_DB_URL` | -- | PostgreSQL connection string; uses SQLite when unset |
 | `DASHBOARD_DB_PATH` | `dashboard.db` | Override SQLite file path |
-| `MAX_SWARM_AGENTS` | `10` | Concurrent swarm agent limit |
 | `CHORUS_ROOT_DIR` | `~/Documents/code` | Root directory scanned for sidebar project list |
 | `DATA_RETENTION_DAYS` | `30` | Days before old events and sessions are pruned |
 | `FORCE_VPN_MODE` | -- | Skip VPN detection, assume on-VPN |
@@ -62,16 +61,13 @@ bun src/index.js
 | `GET` | `/api/health` | Liveness probe + VPN diagnostic state |
 | `GET` | `/api/directories` | List project directories under `CHORUS_ROOT_DIR` |
 
-### Prompt and swarm endpoints
+### Prompt endpoints
 
 | Method | Route | Purpose |
 |--------|-------|---------|
 | `POST` | `/api/sessions/:id/prompt` | Submit prompt via Agent SDK, streams chunks over WebSocket |
 | `POST` | `/api/sessions/:id/prompt/cancel` | Cancel active prompt |
 | `GET` | `/api/sessions/:id/prompt/status` | `{ active: boolean }` |
-| `POST` | `/api/sessions/:id/swarm/spawn` | Spawn independent Claude agent (optional worktree isolation) |
-| `POST` | `/api/swarm/:agentId/cancel` | Cancel a swarm agent |
-| `GET` | `/api/sessions/:id/swarm` | List active swarm agents |
 
 ### Settings endpoints
 
@@ -115,7 +111,6 @@ db-adapter.js         -- backend selector: SQLite (default) or Supabase/PostgreS
 db.js                 -- bun:sqlite schema, prepared statements, cascade delete
 session-resolver.js   -- 5-step alias resolution, 200-entry git root LRU cache
 prompt-sdk.js         -- Agent SDK query(), resume fallback, cancel
-swarm-manager-sdk.js  -- independent agent spawn, worktree isolation, auto-commit
 agent-tools.js        -- Agent SDK tool definitions routed via /bridge namespace
 git-worktree.js       -- worktree create/remove, branch ops, conflict detection
 git-watcher.js        -- chokidar watchers, broadcasts diff:invalidated

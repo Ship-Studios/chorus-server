@@ -30,7 +30,7 @@
  *
  * Directory resolution: uses `session.worktree_dir` when set (worktree-linked
  * sessions), otherwise `session.project_dir`. This means the diff reflects the
- * worktree's uncommitted changes when a swarm agent is working in isolation.
+ * worktree's uncommitted changes when an agent is working in an isolated worktree.
  *
  * @module routes/diff
  */

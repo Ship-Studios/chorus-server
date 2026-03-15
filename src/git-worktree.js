@@ -172,7 +172,7 @@ export async function createWorktree(repoDir, id, description) {
   const baseBranch = currentBranch.startsWith("agent/") ? "main" : currentBranch;
   const slug = slugify(description || id);
   const branchName = `agent/${slug}-${id.slice(0, 6)}`;
-  const worktreePath = join(repoDir, "..", `.swarm-worktree-${id}`);
+  const worktreePath = join(repoDir, "..", `.agent-worktree-${id}`);
 
   await runGitAsync(repoDir, ["worktree", "add", "-b", branchName, worktreePath, baseBranch], {
     timeout: 15000,
@@ -410,9 +410,9 @@ export async function autoCommitWorktree(worktreePath, description, id, branchNa
     });
     const statusOut = stdout.trim();
     if (!statusOut) {
-      console.log(`[swarm:${id}] No changes to commit in worktree`);
+      console.log(`[agent:${id}] No changes to commit in worktree`);
     } else {
-      console.log(`[swarm:${id}] Staging ${statusOut.split("\n").length} changed file(s)`);
+      console.log(`[agent:${id}] Staging ${statusOut.split("\n").length} changed file(s)`);
     }
 
     await runGitAsync(worktreePath, ["add", "-A"], {
@@ -427,11 +427,11 @@ export async function autoCommitWorktree(worktreePath, description, id, branchNa
         GIT_COMMITTER_EMAIL: "agent@dashboard",
       },
     });
-    console.log(`[swarm:${id}] Committed agent changes to branch ${branchName}`);
+    console.log(`[agent:${id}] Committed agent changes to branch ${branchName}`);
   } catch (err) {
     const msg = getGitErrorMessage(err);
     if (!msg.includes("nothing to commit") && !msg.includes("nothing added to commit")) {
-      console.warn(`[swarm:${id}] Auto-commit warning: ${msg}`);
+      console.warn(`[agent:${id}] Auto-commit warning: ${msg}`);
     }
   }
 }

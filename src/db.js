@@ -19,7 +19,7 @@
  * - sessions: Active and historical Claude Code sessions
  * - events: Tool invocations, file edits, and other session events
  * - agents: Sub-agent spawns via the Agent tool
- * - worktrees: Git branches created by swarm agents for PR-like review
+ * - worktrees: Git branches created by agents for PR-like review
  * - users: User authentication and profile data
  * - conversations: Conversation history for Agent SDK sessions
  * - craft_agents/craft_recipes: Agent composition UI (crafting workbench)
@@ -98,7 +98,7 @@ export function runInTransaction(fn) {
  * Key Fields:
  * - id: Unique session identifier (dashboard-generated)
  * - project_dir: Working directory where the session is running
- * - worktree_dir: Git worktree directory (for swarm agents)
+ * - worktree_dir: Git worktree directory (for agents running in isolated worktrees)
  * - git_root: Root of the git repository (resolved asynchronously)
  * - status: 'active' or 'stopped'
  * - current_claude_session_id: Latest CLI session ID associated with this session
@@ -187,7 +187,7 @@ db.exec(`
   /**
    * Worktrees Table
    * ---------------
-   * Tracks worktree branches created by swarm agents for PR-like review.
+   * Tracks worktree branches created by agents for PR-like review.
    * Each row represents a named branch with its diff against a base branch.
    *
    * Key Fields:

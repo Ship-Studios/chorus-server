@@ -53,9 +53,8 @@ Fastify 5 server -- plain JS (ESM, no build step), `bun:sqlite` or Supabase/Post
 
 | File | Role |
 |------|------|
-| `prompt-adapter.js` | Re-export barrel -- all route files import prompt/swarm symbols from here. Delegates to `prompt-sdk.js`. Preserves stable import paths. |
-| `prompt-sdk.js` | `sendPrompt()` -- Agent SDK `query()` with streaming, one active prompt per session (409 on conflict), AbortController cancellation, auto-fallback on expired session. Re-exports swarm and worktree functions. |
-| `swarm-manager-sdk.js` | `spawnSwarmAgent()` -- Agent SDK `query()` per agent, optional worktree isolation, slot reservation before spawn, auto-commit on exit. `cancelSwarmAgent()` -- AbortController cancellation + cleanup. |
+| `prompt-adapter.js` | Re-export barrel -- all route files import prompt symbols from here. Delegates to `prompt-sdk.js`. Preserves stable import paths. |
+| `prompt-sdk.js` | `sendPrompt()` -- Agent SDK `query()` with streaming, one active prompt per session (409 on conflict), AbortController cancellation, auto-fallback on expired session. Re-exports worktree functions. |
 | `agent-tools.js` | Agent SDK tool definitions -- maps Claude Code tools to bridge-routed MCP tool calls with `projectDir` closure injection. |
 | `agent-detector.js` | Extracts agent metadata from `tool_input` when `toolName === "Agent"`. Inserts into `agents` table; truncates prompt to 2000 chars. |
 
@@ -92,7 +91,6 @@ Each exports a default async Fastify plugin registered in `index.js`. Some also 
 | `routes/diff-summary.js` | `POST /api/sessions/:id/diff/summary`, `GET /api/diff-summary/status`. Exports `resetClient()`. |
 | `routes/commit.js` | `POST /api/sessions/:id/commit`. Exports `resetClient()`. |
 | `routes/prompt.js` | `POST /api/sessions/:id/prompt` (15MB body limit), `POST /api/sessions/:id/prompt/cancel`, `GET /api/sessions/:id/prompt/status` |
-| `routes/swarm.js` | `POST /api/sessions/:id/swarm/spawn` (15MB body limit), `POST /api/swarm/:agentId/cancel`, `GET /api/sessions/:id/swarm` |
 | `routes/worktrees/index.js` | Registers list, diff, and mutation sub-plugins. |
 | `routes/worktrees/list.js` | `GET /api/sessions/:id/worktrees` |
 | `routes/worktrees/diff.js` | `GET /api/worktrees/:id/diff`, `GET /api/worktrees/:id/files` |
@@ -123,11 +121,10 @@ Each exports a default async Fastify plugin registered in `index.js`. Some also 
 - **Room management**: Clients emit `join-session` / `leave-session`. `broadcastToSession()` emits to `session:<id>` room.
 - **SQLite `$param` binding**: Always `$paramName` syntax, never `?` or `:name`.
 - **Empty body parser**: Custom `application/json` parser accepts bodyless POSTs (Stop HTTP hook).
-- **Re-export bridges**: `prompt-adapter.js` -> `prompt-sdk.js` -> `swarm-manager-sdk.js` + `git-worktree.js`. `db.js` re-exports `session-resolver.js`. Do not change import paths in routes.
+- **Re-export bridges**: `prompt-adapter.js` -> `prompt-sdk.js` -> `git-worktree.js`. `db.js` re-exports `session-resolver.js`. Do not change import paths in routes.
 - **`resetClient()` exports**: `diff-summary.js`, `commit.js`, `crafting.js` each export `resetClient()`. Called on VPN reconfigure and API key update.
-- **Agent SDK backend**: All prompt and swarm operations use Agent SDK `query()` in-process. Tool calls route through `/bridge` namespace. No CLI subprocess spawning.
+- **Agent SDK backend**: All prompt operations use Agent SDK `query()` in-process. Tool calls route through `/bridge` namespace. No CLI subprocess spawning.
 - **Prompt fallback**: `sendPrompt()` retries as fresh `query()` when resume fails. Emits `prompt:context-lost`.
-- **Swarm slot reservation**: Inserts `"pending"` entry before SDK query for `MAX_SWARM_AGENTS` enforcement.
 - **Model validation**: `/^[a-zA-Z0-9._/-]+$/` before passing to Agent SDK.
 - **CWD validation**: `existsSync(dir)` before spawning git. macOS `posix_spawn` gives misleading ENOENT.
 - **Git root LRU**: 200-entry Map, 5-min TTL, promise-deduped. Git I/O runs outside SQLite transactions.

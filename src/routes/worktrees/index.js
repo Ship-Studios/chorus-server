@@ -1,6 +1,6 @@
 /**
  * Worktree review routes — list, diff, merge, discard, and check conflicts
- * for git worktree branches created by swarm agents.
+ * for git worktree branches created by agents.
  *
  * Composed from:
  *   list.js      — GET /api/sessions/:id/worktrees (auto-discovers unregistered branches)

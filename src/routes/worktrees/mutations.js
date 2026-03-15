@@ -1,6 +1,6 @@
 /**
  * Worktree mutation routes — merge, discard, and check conflicts
- * for git worktree branches created by swarm agents.
+ * for git worktree branches created by agents.
  *
  * Endpoints:
  *   POST   /api/worktrees/:id/merge           — Merge branch via `git merge --no-ff`, then delete branch

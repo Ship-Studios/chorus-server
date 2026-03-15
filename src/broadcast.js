@@ -74,7 +74,7 @@ const broadcastInterceptors = new Set();
 /**
  * Register a callback that is invoked every time `broadcastToSession` fires.
  * Used by prompt-adapter.js to clean up tracking maps when bridge lifecycle
- * events (prompt:done, swarm:done) arrive.
+ * events (prompt:done, agent:done) arrive.
  *
  * @param {(sessionId: string, message: object) => void} fn
  * @returns {() => void} Unregister function
@@ -86,7 +86,7 @@ export function onBroadcastToSession(fn) {
 
 /**
  * Broadcasts a message only to clients subscribed to a specific session room.
- * Used for session-specific events like prompt:*, swarm:*, diff:*, worktree:*.
+ * Used for session-specific events like prompt:*, agent:*, diff:*, worktree:*.
  *
  * @param {string} sessionId - The ID of the session room to broadcast to.
  * @param {object} message - The message object to broadcast.
