@@ -106,12 +106,15 @@ Tests use `bun:test`. Integration tests build in-memory Fastify apps with in-mem
 ```
 index.js              -- Fastify bootstrap, route registration, Socket.IO init
 socket.js             -- getIO/setIO singleton
-broadcast.js          -- global + session-scoped emit helpers, diff debounce
-db-adapter.js         -- backend selector: SQLite (default) or Supabase/PostgreSQL
-db.js                 -- bun:sqlite schema, prepared statements, cascade delete
+broadcast.js          -- global + session-scoped emit helpers, diff debounce, broadcast interceptors
+db-adapter.js         -- thin backend selector: dynamically imports db-sqlite/ or db-supabase.js
+db.js                 -- bun:sqlite schema, low-level prepared statements, cascade delete
+db-sqlite/            -- SQLite domain modules (sessions.js, events.js, worktrees.js, agents.js, …)
 session-resolver.js   -- 5-step alias resolution, 200-entry git root LRU cache
 prompt-sdk.js         -- Agent SDK query(), resume fallback, cancel
 agent-tools.js        -- Agent SDK tool definitions routed via /bridge namespace
+swarm-tracking.js     -- in-memory active-agent map; trackAgent/cancelAgent/getActiveAgents;
+                         _broadcastInterceptor auto-removes agents on prompt:done
 git-worktree.js       -- worktree create/remove, branch ops, conflict detection
 git-watcher.js        -- chokidar watchers, broadcasts diff:invalidated
 diff-cache.js         -- 15s TTL in-memory cache for diff responses
