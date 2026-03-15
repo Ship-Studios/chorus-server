@@ -9,14 +9,16 @@
     "eval:diff-summary": "bun run src/evals/diff-summary.eval.js"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.76",
     "@anthropic-ai/sdk": "^0.78.0",
     "@chorus/diff-panel": "workspace:*",
     "@fastify/compress": "^8.3.1",
+    "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^11.2.0",
     "@fastify/etag": "^6.1.0",
     "@fastify/helmet": "^13.0.2",
+    "@fastify/oauth2": "^8.2.0",
     "@fastify/rate-limit": "^10.3.0",
+    "@fastify/secure-session": "^8.3.0",
     "@fastify/static": "^9.0.0",
     "@fastify/under-pressure": "^9.0.3",
     "chokidar": "^4.0.3",

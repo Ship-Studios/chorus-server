@@ -7,7 +7,7 @@
  * @module swarm-tracking
  */
 
-import { cancelBridgeSwarm } from "./routes/bridge.js";
+import { cancelBridgePrompt } from "./routes/bridge.js";
 import { onBroadcastToSession } from "./broadcast.js";
 
 /**
@@ -40,7 +40,7 @@ export function untrackSwarmAgent(agentId) {
  * @returns {{ cancelled: boolean }}
  */
 export function cancelSwarmAgent(agentId) {
-  const cancelled = cancelBridgeSwarm(agentId);
+  const cancelled = cancelBridgePrompt(agentId);
   if (cancelled) {
     activeSwarmAgentMap.delete(agentId);
   }

@@ -13,4 +13,4 @@ export {
   detectConflicts,
   removeWorktree,
   getCurrentBranch,
-} from "./prompt-sdk.js";
+} from "./git-worktree.js";

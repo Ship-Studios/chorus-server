@@ -11,6 +11,178 @@
 import { sql } from "./db-pg.js";
 
 // ---------------------------------------------------------------------------
+// Users & auth
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrieves a user by their unique ID.
+ *
+ * @param {string} id - The user's unique identifier
+ * @returns {Promise<object|null>} The user record, or null if not found
+ */
+export async function getUserById(id) {
+  const [row] = await sql`SELECT * FROM users WHERE id = ${id}`;
+  return row ?? null;
+}
+
+/**
+ * Retrieves a user by their Google OAuth ID.
+ *
+ * @param {string} googleId - The Google OAuth identifier
+ * @returns {Promise<object|null>} The user record, or null if not found
+ */
+export async function getUserByGoogleId(googleId) {
+  const [row] = await sql`SELECT * FROM users WHERE google_id = ${googleId}`;
+  return row ?? null;
+}
+
+/**
+ * Retrieves a user by their dashboard API key.
+ *
+ * @param {string} apiKey - The dashboard API key
+ * @returns {Promise<object|null>} The user record, or null if not found
+ */
+export async function getUserByApiKey(apiKey) {
+  const [row] = await sql`SELECT * FROM users WHERE dashboard_api_key = ${apiKey}`;
+  return row ?? null;
+}
+
+/**
+ * Inserts or updates a user record based on Google OAuth authentication.
+ * On conflict (duplicate google_id), updates email, name, avatar_url, and last_login_at.
+ *
+ * @param {{ id: string, googleId: string, email: string, name: string|null, avatarUrl: string|null, apiKey: string }} params
+ * @returns {Promise<object>} The created or updated user record
+ */
+export async function upsertUser({ id, googleId, email, name, avatarUrl, apiKey }) {
+  const [row] = await sql`
+    INSERT INTO users (id, google_id, email, name, avatar_url, dashboard_api_key)
+    VALUES (${id}, ${googleId}, ${email}, ${name ?? null}, ${avatarUrl ?? null}, ${apiKey})
+    ON CONFLICT(google_id) DO UPDATE SET
+      email = EXCLUDED.email,
+      name = EXCLUDED.name,
+      avatar_url = EXCLUDED.avatar_url,
+      last_login_at = NOW()
+    RETURNING *
+  `;
+  return row;
+}
+
+/**
+ * Updates a user's dashboard API key.
+ *
+ * @param {string} id - The user's unique identifier
+ * @param {string} newApiKey - The new API key to set
+ * @returns {Promise<object|null>} The updated user record, or null if user not found
+ */
+export async function updateUserApiKey(id, newApiKey) {
+  const [row] = await sql`
+    UPDATE users SET dashboard_api_key = ${newApiKey} WHERE id = ${id} RETURNING *
+  `;
+  return row ?? null;
+}
+
+/**
+ * Retrieves all sessions associated with a user, ordered by start time (newest first).
+ * Limited to the 50 most recent sessions.
+ *
+ * @param {string} userId - The user's unique identifier
+ * @returns {Promise<object[]>} Array of session records
+ */
+export async function getAllSessionsByUser(userId) {
+  return sql`SELECT * FROM sessions WHERE user_id = ${userId} ORDER BY started_at DESC LIMIT 50`;
+}
+
+/**
+ * Retrieves recent events for a user across all their sessions.
+ * Joins with sessions table to include project_dir.
+ * Limited to the 100 most recent events.
+ *
+ * @param {string} userId - The user's unique identifier
+ * @returns {Promise<object[]>} Array of event records with project_dir
+ */
+export async function getRecentEventsByUser(userId) {
+  return sql`
+    SELECT e.*, s.project_dir FROM events e
+    JOIN sessions s ON e.session_id = s.id
+    WHERE s.user_id = ${userId}
+    ORDER BY e.created_at DESC LIMIT 100
+  `;
+}
+
+/**
+ * Slim version of getRecentEventsByUser — excludes the large payload column
+ * to reduce data transfer size. Includes a boolean flag indicating whether
+ * a payload exists.
+ *
+ * @param {string} userId - The user's unique identifier
+ * @returns {Promise<object[]>} Array of slim event records with project_dir
+ */
+export async function getRecentEventsSlimByUser(userId) {
+  return sql`
+    SELECT e.id, e.session_id, e.type, e.tool_name, e.file_path, e.summary,
+           e.payload IS NOT NULL AS "hasPayload", e.created_at, s.project_dir
+    FROM events e
+    JOIN sessions s ON e.session_id = s.id
+    WHERE s.user_id = ${userId}
+    ORDER BY e.created_at DESC LIMIT 100
+  `;
+}
+
+// --- User settings ---
+
+/**
+ * Retrieves all settings for a user, ordered by key.
+ *
+ * @param {string} userId - The user's unique identifier
+ * @returns {Promise<object[]>} Array of user setting records
+ */
+export async function getUserSettings(userId) {
+  return sql`SELECT * FROM user_settings WHERE user_id = ${userId} ORDER BY key`;
+}
+
+/**
+ * Retrieves a specific user setting by key.
+ *
+ * @param {string} userId - The user's unique identifier
+ * @param {string} key - The setting key
+ * @returns {Promise<object|null>} The setting record, or null if not found
+ */
+export async function getUserSetting(userId, key) {
+  const [row] = await sql`SELECT * FROM user_settings WHERE user_id = ${userId} AND key = ${key}`;
+  return row ?? null;
+}
+
+/**
+ * Inserts or updates a user setting.
+ * On conflict (user_id, key), updates value, encrypted flag, and updated_at timestamp.
+ *
+ * @param {{ userId: string, key: string, value: string, encrypted: boolean|null }} params
+ * @returns {Promise<void>}
+ */
+export async function upsertUserSetting({ userId, key, value, encrypted }) {
+  await sql`
+    INSERT INTO user_settings (user_id, key, value, encrypted, updated_at)
+    VALUES (${userId}, ${key}, ${value}, ${encrypted ?? false}, NOW())
+    ON CONFLICT (user_id, key) DO UPDATE SET
+      value = EXCLUDED.value,
+      encrypted = EXCLUDED.encrypted,
+      updated_at = NOW()
+  `;
+}
+
+/**
+ * Deletes a specific user setting.
+ *
+ * @param {string} userId - The user's unique identifier
+ * @param {string} key - The setting key to delete
+ * @returns {Promise<void>}
+ */
+export async function deleteUserSetting(userId, key) {
+  await sql`DELETE FROM user_settings WHERE user_id = ${userId} AND key = ${key}`;
+}
+
+// ---------------------------------------------------------------------------
 // Agent (sub-agent) tracking
 // ---------------------------------------------------------------------------
 

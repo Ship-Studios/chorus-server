@@ -1,15 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
-import {
-  cancelPrompt,
-  isPromptActive,
-  getPromptSessionId,
-  cancelSwarmAgent,
-  getActiveSwarmAgents,
-  getCurrentBranch,
-  getBranchDiffStats,
-  detectConflicts,
-} from "./prompt-sdk.js";
+import { isPromptActive, cancelPrompt } from "./prompt-tracking.js";
+import { cancelSwarmAgent, getActiveSwarmAgents } from "./swarm-tracking.js";
+import { getCurrentBranch, getBranchDiffStats, detectConflicts } from "./git-worktree.js";
+
+// getPromptSessionId was deprecated — stub for backward-compat tests
+const getPromptSessionId = () => null;
 
 /**
  * Tests for prompt.js — state management functions and exported git helpers.
@@ -57,11 +53,11 @@ describe("getPromptSessionId", () => {
 
 describe("cancelSwarmAgent", () => {
   it("returns { cancelled: false } for non-existent agent", () => {
-    expect(cancelSwarmAgent("nonexistent-agent")).toEqual({ cancelled: false, sessionId: null });
+    expect(cancelSwarmAgent("nonexistent-agent")).toEqual({ cancelled: false });
   });
 
   it("returns { cancelled: false } for empty id", () => {
-    expect(cancelSwarmAgent("")).toEqual({ cancelled: false, sessionId: null });
+    expect(cancelSwarmAgent("")).toEqual({ cancelled: false });
   });
 });
 

@@ -9,7 +9,8 @@ import {
   insertAlias,
 } from "../db-adapter.js";
 import { resolveSessionId, lookupSessionId } from "../session-resolver.js";
-import { isPromptActive, cancelPrompt, getActiveSwarmAgents, cancelSwarmAgent } from "../prompt-adapter.js";
+import { isPromptActive, cancelPrompt } from "../prompt-adapter.js";
+import { getActiveSwarmAgents, cancelSwarmAgent } from "../swarm-tracking.js";
 import { startWatching, stopWatching } from "../git-watcher.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
 import { clearSessionSyncState } from "../session-sync.js";
@@ -56,7 +57,7 @@ export default async function sessionRoutes(fastify) {
       sessionId = claudeSessionId;
       await insertAlias(claudeSessionId, claudeSessionId);
     } else {
-      sessionId = await resolveSessionId(claudeSessionId, projectDir);
+      sessionId = await resolveSessionId(claudeSessionId, projectDir, request.user?.id);
     }
 
     const currentSession = await getSession(sessionId);
@@ -140,21 +141,6 @@ export default async function sessionRoutes(fastify) {
     // Start watching .git for changes (deduplicates by directory)
     const watchDir = nextSession.worktree_dir || nextSession.project_dir;
     startWatching(sessionId, watchDir);
-
-    // Notify UI about the swarm agent → session linkage
-    if (swarmAgentId) {
-      // Look up the parent session ID from the in-memory swarm agent registry
-      const activeAgents = getActiveSwarmAgents();
-      const swarmEntry = activeAgents.find((a) => a.id === swarmAgentId);
-      const parentSessionId = swarmEntry?.sessionId ?? null;
-      broadcastToSession(parentSessionId, {
-        type: "swarm:session-linked",
-        agentId: swarmAgentId,
-        parentSessionId,
-        dashboardSessionId: sessionId,
-        claudeSessionId,
-      });
-    }
 
     return { ok: true };
   });

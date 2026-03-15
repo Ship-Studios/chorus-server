@@ -88,7 +88,7 @@ export default async function eventRoutes(fastify) {
       return reply.code(400).send({ error: "sessionId is required" });
     }
 
-    const sessionId = await resolveSessionId(claudeSessionId, body.projectDir || "unknown");
+    const sessionId = await resolveSessionId(claudeSessionId, body.projectDir || "unknown", request.user?.id);
 
     syncSessionActivity(sessionId, body.projectDir || "unknown");
 
@@ -165,7 +165,7 @@ export default async function eventRoutes(fastify) {
     if (!rawId) return reply.code(200).send();
 
     const projectDir = body.cwd || "unknown";
-    const sessionId = await resolveSessionId(rawId, projectDir);
+    const sessionId = await resolveSessionId(rawId, projectDir, req.user?.id);
     const toolName = body.tool_name;
     const toolInput = body.tool_input ?? {};
     const toolResponse = body.tool_response ?? {};
@@ -229,7 +229,7 @@ export default async function eventRoutes(fastify) {
     if (!rawId) return reply.code(200).send();
 
     const projectDir = body.cwd || "unknown";
-    const sessionId = await resolveSessionId(rawId, projectDir);
+    const sessionId = await resolveSessionId(rawId, projectDir, req.user?.id);
     const toolName = body.tool_name;
     const toolInput = body.tool_input ?? {};
     const error = body.error || "Tool failed";

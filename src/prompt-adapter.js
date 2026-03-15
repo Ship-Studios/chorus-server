@@ -6,8 +6,7 @@
  * without changes.
  *
  * Decomposed modules:
- * - prompt-tracking.js — Session-to-request mapping for prompt lifecycle
- * - swarm-tracking.js — Swarm agent lifecycle tracking and management
+ * - prompt-tracking.js — Instance-to-session mapping for prompt lifecycle
  * - bridge-exports.js — Direct bridge relay function re-exports
  * - git-operations.js — Git worktree operation re-exports
  *
@@ -22,23 +21,12 @@ export {
   cancelPrompt,
 } from "./prompt-tracking.js";
 
-// Re-export swarm tracking functions
-export {
-  trackSwarmAgent,
-  untrackSwarmAgent,
-  cancelSwarmAgent,
-  getActiveSwarmAgents,
-  hasActiveSwarmAgents,
-} from "./swarm-tracking.js";
-
 // Re-export bridge relay functions
 export {
   dispatchPromptToBridge,
   cancelBridgePrompt,
   isBridgePromptActive,
   isBridgeConnected,
-  dispatchSwarmToBridge,
-  cancelBridgeSwarm,
 } from "./bridge-exports.js";
 
 // Re-export git worktree operations
@@ -62,18 +50,8 @@ export function sendPrompt() {
 }
 
 /**
- * @deprecated Use dispatchSwarmToBridge instead
- */
-export function spawnSwarmAgent() {
-  throw new Error("spawnSwarmAgent() is deprecated — use dispatchSwarmToBridge() via the bridge relay");
-}
-
-/**
- * @deprecated Use cancelPrompt(sessionId) which delegates to cancelBridgePrompt
+ * @deprecated No longer applicable — use cancelPrompt(sessionId)
  */
 export function getPromptSessionId() {
   return null;
 }
-
-// Note: Auto-cleanup via broadcast interceptors is now handled within
-// prompt-tracking.js and swarm-tracking.js modules.

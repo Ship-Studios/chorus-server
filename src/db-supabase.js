@@ -44,6 +44,22 @@ export {
   deleteSetting,
 } from "./db-pg.js";
 
+// Users + auth + user settings
+export {
+  getUserById,
+  getUserByGoogleId,
+  getUserByApiKey,
+  upsertUser,
+  updateUserApiKey,
+  getAllSessionsByUser,
+  getRecentEventsByUser,
+  getRecentEventsSlimByUser,
+  getUserSettings,
+  getUserSetting,
+  upsertUserSetting,
+  deleteUserSetting,
+} from "./db-pg-extended.js";
+
 // Agents + worktrees + crafting + maintenance
 export {
   insertAgent,

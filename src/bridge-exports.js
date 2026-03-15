@@ -12,6 +12,4 @@ export {
   cancelBridgePrompt,
   isBridgePromptActive,
   isBridgeConnected,
-  dispatchSwarmToBridge,
-  cancelBridgeSwarm,
 } from "./routes/bridge.js";

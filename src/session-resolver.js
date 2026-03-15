@@ -136,9 +136,10 @@ function scheduleGitRootHydration(sessionId, projectDir) {
  *
  * @param {string} claudeSessionId - The session_id from the Claude Code hook payload
  * @param {string} projectDir - The project directory
+ * @param {string|null} [userId] - Optional user ID (multi-user mode) to tag new sessions
  * @returns {Promise<string>} The canonical dashboard session ID
  */
-export async function resolveSessionId(claudeSessionId, projectDir) {
+export async function resolveSessionId(claudeSessionId, projectDir, userId = null) {
   const needsProjectDir = projectDir && projectDir !== "unknown";
 
   const directMatch = await runInTransaction(async (tx) => {
@@ -231,6 +232,7 @@ export async function resolveSessionId(claudeSessionId, projectDir) {
       status: "active",
       model: null,
       currentClaudeSessionId: claudeSessionId,
+      userId,
     });
     return claudeSessionId;
   });

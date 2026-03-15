@@ -1,3 +1,42 @@
+/**
+ * Database Module for Claude Code Dashboard
+ *
+ * This module provides the central SQLite database interface for the dashboard server.
+ * It manages session tracking, event logging, agent monitoring, user authentication,
+ * and conversation history for the Claude Code Agent SDK.
+ *
+ * @module db
+ *
+ * Architecture Overview:
+ * ----------------------
+ * - Uses SQLite with WAL mode for concurrent reads and improved write performance
+ * - Prepared statements exported for optimal performance (compiled once, executed many times)
+ * - Transaction support via runInTransaction() for atomic multi-step operations
+ * - Automatic schema migrations for backward compatibility
+ *
+ * Core Tables:
+ * ------------
+ * - sessions: Active and historical Claude Code sessions
+ * - events: Tool invocations, file edits, and other session events
+ * - agents: Sub-agent spawns via the Agent tool
+ * - worktrees: Git branches created by swarm agents for PR-like review
+ * - users: User authentication and profile data
+ * - conversations: Conversation history for Agent SDK sessions
+ * - craft_agents/craft_recipes: Agent composition UI (crafting workbench)
+ *
+ * Environment Variables:
+ * ----------------------
+ * - DASHBOARD_DB_PATH: Custom database file location (default: ./dashboard.db)
+ * - DATA_RETENTION_DAYS: Days to retain old events/sessions (default: 30)
+ *
+ * Performance Tuning:
+ * -------------------
+ * - WAL mode: Enables concurrent reads during writes
+ * - 64MB page cache: Keeps frequently accessed data in memory
+ * - Memory-mapped I/O: Reduces syscall overhead for large reads
+ * - Optimized indexes: Composite indexes for common query patterns
+ */
+
 import { Database } from "bun:sqlite";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +46,12 @@ const DB_PATH = process.env.DASHBOARD_DB_PATH
   ? resolve(process.env.DASHBOARD_DB_PATH)
   : resolve(__dirname, "..", "dashboard.db");
 
+// Initialize database with automatic schema creation
 const db = new Database(DB_PATH, { create: true });
+
+// ---------------------------------------------------------------------------
+// Database configuration and performance optimization
+// ---------------------------------------------------------------------------
 
 db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
@@ -17,15 +61,49 @@ db.exec("PRAGMA temp_store = MEMORY");       // Sort temp tables in RAM, not dis
 db.exec("PRAGMA mmap_size = 268435456");     // 256MB memory-mapped reads — reduces syscall overhead
 db.exec("PRAGMA optimize");                  // Update query planner statistics at startup
 
+// ---------------------------------------------------------------------------
+// Transaction Support
+// ---------------------------------------------------------------------------
+
 /**
  * Runs a function inside a SQLite transaction (BEGIN IMMEDIATE / COMMIT).
  * IMMEDIATE mode acquires a write lock at BEGIN — prevents TOCTOU races
  * where concurrent readers all see empty state before any writer commits.
+ *
+ * @param {Function} fn - Function to execute within the transaction
+ * @returns {*} Return value of the function
+ * @throws {Error} If the transaction fails and is rolled back
+ *
+ * @example
+ * runInTransaction(() => {
+ *   insertEvent.run({ sessionId: 'abc', type: 'tool_call' });
+ *   updateSessionStatus.run({ id: 'abc', status: 'active' });
+ * });
  */
 export function runInTransaction(fn) {
   return db.transaction(fn)();
 }
 
+// ---------------------------------------------------------------------------
+// Core Schema: Sessions & Events
+// ---------------------------------------------------------------------------
+
+/**
+ * Sessions Table
+ * --------------
+ * Represents a Claude Code conversation session. Sessions can be active (ongoing)
+ * or stopped (completed/terminated). Multiple CLI invocations can map to the same
+ * session via the session_aliases table.
+ *
+ * Key Fields:
+ * - id: Unique session identifier (dashboard-generated)
+ * - project_dir: Working directory where the session is running
+ * - worktree_dir: Git worktree directory (for swarm agents)
+ * - git_root: Root of the git repository (resolved asynchronously)
+ * - status: 'active' or 'stopped'
+ * - current_claude_session_id: Latest CLI session ID associated with this session
+ * - user_id: User who owns this session (added via migration below)
+ */
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -39,6 +117,19 @@ db.exec(`
     last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  /**
+   * Events Table
+   * ------------
+   * Records all tool invocations and significant actions within a session.
+   * Events are the primary audit log for debugging and understanding session behavior.
+   *
+   * Key Fields:
+   * - type: Event category (e.g., 'tool_call', 'agent_spawn', 'error')
+   * - tool_name: Name of the tool invoked (if applicable)
+   * - file_path: File affected by the event (if applicable)
+   * - summary: Human-readable event description
+   * - payload: JSON blob with full event details
+   */
   CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -54,16 +145,31 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
   CREATE INDEX IF NOT EXISTS idx_events_session_created ON events(session_id, created_at DESC);
 
-  -- Maps Claude Code CLI session_ids to canonical dashboard session IDs.
-  -- Multiple CLI invocations (reconnects) for the same conversation resolve
-  -- to a single dashboard session.
+  /**
+   * Session Aliases Table
+   * ---------------------
+   * Maps Claude Code CLI session_ids to canonical dashboard session IDs.
+   * Multiple CLI invocations (reconnects) for the same conversation resolve
+   * to a single dashboard session, enabling conversation continuity across
+   * disconnects and reconnects.
+   */
   CREATE TABLE IF NOT EXISTS session_aliases (
     claude_session_id TEXT PRIMARY KEY,
     dashboard_session_id TEXT NOT NULL
   );
 
-  -- Tracks sub-agents spawned via the Agent tool within a session.
-  -- Each row represents one Agent tool invocation (one sub-agent run).
+  /**
+   * Agents Table
+   * ------------
+   * Tracks sub-agents spawned via the Agent tool within a session.
+   * Each row represents one Agent tool invocation (one sub-agent run).
+   *
+   * Key Fields:
+   * - agent_type: Type of agent (e.g., 'explore', 'test-runner', 'plan')
+   * - status: 'running', 'completed', 'failed'
+   * - prompt: The task/prompt given to the agent
+   * - event_id: Links to the event that spawned this agent
+   */
   CREATE TABLE IF NOT EXISTS agents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -78,8 +184,19 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_agents_session ON agents(session_id);
   CREATE INDEX IF NOT EXISTS idx_agents_session_created ON agents(session_id, created_at DESC);
 
-  -- Tracks worktree branches created by swarm agents for PR-like review.
-  -- Each row represents a named branch with its diff against a base branch.
+  /**
+   * Worktrees Table
+   * ---------------
+   * Tracks worktree branches created by swarm agents for PR-like review.
+   * Each row represents a named branch with its diff against a base branch.
+   *
+   * Key Fields:
+   * - branch_name: Name of the git branch
+   * - base_branch: Branch to compare against (usually 'main' or 'master')
+   * - status: 'pending', 'ready', 'merged', 'abandoned'
+   * - diff_stat: Summary of changes (e.g., "+123 -45")
+   * - conflict_info: JSON blob describing merge conflicts (if any)
+   */
   CREATE TABLE IF NOT EXISTS worktrees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -101,7 +218,15 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_branch ON worktrees(session_id, branch_name);
   CREATE INDEX IF NOT EXISTS idx_sessions_project_status ON sessions(project_dir, status);
 
-  -- Crafting workbench tables (agent composition UI)
+  /**
+   * Crafting Workbench Tables
+   * -------------------------
+   * Supports the agent composition UI where users can create custom agents
+   * by combining prompt snippets and configuring behavior.
+   *
+   * craft_agents: Reusable agent "ingredients" with prompt snippets
+   * craft_recipes: Composed agents created by combining multiple ingredients
+   */
   CREATE TABLE IF NOT EXISTS craft_agents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -130,12 +255,101 @@ db.exec(`
   );
 `);
 
+// ---------------------------------------------------------------------------
+// Schema Migrations
+// ---------------------------------------------------------------------------
+
+/**
+ * Backward-compatible schema migrations for existing databases.
+ * These ALTER TABLE statements add columns that were introduced after initial
+ * deployment. They check for column existence first to avoid errors on fresh
+ * installations or when running migrations multiple times.
+ *
+ * Migration Strategy:
+ * - Check PRAGMA table_info to detect missing columns
+ * - Add columns with ALTER TABLE (safe because they're nullable or have defaults)
+ * - Create indexes after adding foreign key columns
+ *
+ * Note: SQLite does not support adding foreign key constraints to existing tables,
+ * so user_id uses REFERENCES but enforcement depends on PRAGMA foreign_keys=ON.
+ */
 const sessionColumns = db.query("PRAGMA table_info(sessions)").all();
+
+// Migration: Add git_root column (for associating sessions with git repositories)
 if (!sessionColumns.some((column) => column.name === "git_root")) {
   db.exec("ALTER TABLE sessions ADD COLUMN git_root TEXT");
 }
 
-// Conversation history for Agent SDK sessions (replaces CLI --resume mechanism).
+// Migration: Add user_id column (for multi-user authentication support)
+if (!sessionColumns.some((column) => column.name === "user_id")) {
+  db.exec("ALTER TABLE sessions ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE SET NULL");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)");
+}
+
+// ---------------------------------------------------------------------------
+// Users & Authentication Schema
+// ---------------------------------------------------------------------------
+/**
+ * Users Table
+ * -----------
+ * Stores user accounts for multi-user dashboard access. Currently supports
+ * Google OAuth authentication.
+ *
+ * Key Fields:
+ * - google_id: Unique identifier from Google OAuth
+ * - dashboard_api_key: Secret token for Bearer authentication (CLI to dashboard)
+ * - email: User email from Google profile
+ * - avatar_url: Profile picture URL
+ */
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    google_id TEXT UNIQUE NOT NULL,
+    email TEXT NOT NULL,
+    name TEXT,
+    avatar_url TEXT,
+    dashboard_api_key TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_login_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_api_key ON users(dashboard_api_key);
+
+  /**
+   * User Settings Table
+   * -------------------
+   * Key-value store for per-user configuration. Supports optional encryption
+   * for sensitive values (e.g., API keys, tokens).
+   *
+   * Key Fields:
+   * - encrypted: 1 if value is encrypted, 0 if plaintext
+   * - value: Setting value (encrypted or plaintext depending on flag)
+   */
+  CREATE TABLE IF NOT EXISTS user_settings (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    encrypted INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, key)
+  );
+`);
+
+// ---------------------------------------------------------------------------
+// Conversation History (Agent SDK)
+// ---------------------------------------------------------------------------
+
+/**
+ * Conversations Table
+ * -------------------
+ * Stores conversation history for Agent SDK sessions, enabling conversation
+ * resumption and context persistence. Replaces the CLI --resume mechanism.
+ *
+ * Key Fields:
+ * - messages: JSON array of message objects (user, assistant, tool use, etc.)
+ * - system_prompt: Initial system prompt for the conversation
+ * - total_tokens: Running token count for cost tracking
+ */
 db.exec(`
   CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
@@ -148,6 +362,26 @@ db.exec(`
   )
 `);
 
+// ---------------------------------------------------------------------------
+// Performance Indexes
+// ---------------------------------------------------------------------------
+
+/**
+ * Composite and single-column indexes optimized for common query patterns.
+ *
+ * Index Strategy:
+ * - Composite indexes follow the "equality, range, sort" pattern
+ * - Indexes on foreign keys for efficient JOIN operations
+ * - DESC indexes for "most recent" queries (newest first)
+ * - Covering indexes where possible to avoid table lookups
+ *
+ * Query Patterns Optimized:
+ * - Recent sessions by project directory
+ * - Active sessions filtered by git root
+ * - Events for a session sorted by time
+ * - Recent agent runs across all sessions
+ * - Worktree status filtering and sorting
+ */
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_sessions_started_at ON sessions(started_at DESC);
@@ -160,6 +394,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_worktrees_status_created ON worktrees(status, created_at DESC);
 `);
 
+// ---------------------------------------------------------------------------
+// Prepared Statements: Sessions
+// ---------------------------------------------------------------------------
+
 /**
  * Insert or update a session row. Update semantics:
  * - `model`: keeps existing value if the new value is NULL (hooks may not always send it)
@@ -169,8 +407,8 @@ db.exec(`
  *   subprocess is active to avoid clobbering the real session ID with an ephemeral one
  */
 export const upsertSession = db.prepare(`
-  INSERT INTO sessions (id, project_dir, worktree_dir, git_root, status, model, current_claude_session_id)
-  VALUES ($id, $projectDir, $worktreeDir, $gitRoot, $status, $model, $currentClaudeSessionId)
+  INSERT INTO sessions (id, project_dir, worktree_dir, git_root, status, model, current_claude_session_id, user_id)
+  VALUES ($id, $projectDir, $worktreeDir, $gitRoot, $status, $model, $currentClaudeSessionId, $userId)
   ON CONFLICT(id) DO UPDATE SET
     status = $status,
     model = COALESCE($model, sessions.model),
@@ -185,6 +423,7 @@ export const upsertSession = db.prepare(`
     END,
     git_root = COALESCE($gitRoot, sessions.git_root),
     current_claude_session_id = COALESCE($currentClaudeSessionId, sessions.current_claude_session_id),
+    user_id = COALESCE(sessions.user_id, $userId),
     last_seen_at = datetime('now')
 `);
 
@@ -204,6 +443,10 @@ export const updateSessionStatus = db.prepare(`
 export const touchSessionActive = db.prepare(`
   UPDATE sessions SET status = 'active', last_seen_at = datetime('now') WHERE id = $id
 `);
+
+// ---------------------------------------------------------------------------
+// Prepared Statements: Events
+// ---------------------------------------------------------------------------
 
 /** Inserts a new event into the database. */
 export const insertEvent = db.prepare(`
@@ -264,7 +507,9 @@ export const getRecentEventsSlim = db.prepare(`
   ORDER BY e.created_at DESC LIMIT 100
 `);
 
-// --- Agent (sub-agent) tracking ---
+// ---------------------------------------------------------------------------
+// Prepared Statements: Agent (Sub-Agent) Tracking
+// ---------------------------------------------------------------------------
 
 /** Inserts a new sub-agent record. */
 export const insertAgent = db.prepare(`
@@ -283,7 +528,9 @@ export const getSessionAgentCount = db.prepare(`
   SELECT COUNT(*) as count FROM agents WHERE session_id = $sessionId
 `);
 
-// --- Worktree (PR-like review) tracking ---
+// ---------------------------------------------------------------------------
+// Prepared Statements: Worktree (PR-like Review) Tracking
+// ---------------------------------------------------------------------------
 
 /** Inserts or updates a worktree record for a session and branch. */
 export const insertWorktree = db.prepare(`
@@ -351,8 +598,11 @@ export const deleteWorktreeRow = db.prepare(`
   DELETE FROM worktrees WHERE id = $id
 `);
 
-// --- Session alias resolution ---
-// Prepared statements exported for use by session-resolver.js
+// ---------------------------------------------------------------------------
+// Prepared Statements: Session Alias Resolution
+// ---------------------------------------------------------------------------
+// These statements are exported for use by session-resolver.js to implement
+// the session continuity logic that maps CLI session IDs to dashboard sessions.
 
 /** Retrieves the dashboard session ID associated with a Claude session ID. */
 export const getAlias = db.prepare(`
@@ -397,14 +647,19 @@ export const findRecentSessionByGitRoot = db.prepare(`
   LIMIT 1
 `);
 
-// Re-export resolveSessionId and lookupSessionId from session-resolver.js
-// so existing route imports from db.js continue to work unchanged.
+/**
+ * Re-export session resolver functions for convenience.
+ * This maintains backward compatibility for existing route imports that expect
+ * these functions to be available from db.js.
+ */
 export { resolveSessionId, lookupSessionId } from "./session-resolver.js";
 
 /** Returns the ID of the last inserted row. */
 export const getLastInsertRowId = () => db.query("SELECT last_insert_rowid() AS id").get();
 
-// --- Session deletion (cascading) ---
+// ---------------------------------------------------------------------------
+// Session Deletion (Cascading)
+// ---------------------------------------------------------------------------
 
 const deleteSessionAliases = db.prepare(`
   DELETE FROM session_aliases WHERE dashboard_session_id = $sessionId
@@ -448,7 +703,9 @@ export function deleteSession(sessionId) {
   return true;
 }
 
-// --- Crafting workbench ---
+// ---------------------------------------------------------------------------
+// Prepared Statements: Crafting Workbench
+// ---------------------------------------------------------------------------
 
 /** Retrieves all crafting agents, ordered by name. */
 export const getAllCraftAgents = db.prepare(`SELECT * FROM craft_agents ORDER BY name`);
@@ -507,6 +764,11 @@ export const deleteCraftRecipeStmt = db.prepare(`DELETE FROM craft_recipes WHERE
  * Keeps the oldest session (first created), re-parents all data from duplicates.
  * Intended to run once at server startup to clean up any existing duplicates
  * caused by the now-fixed TOCTOU race in resolveSessionId.
+ *
+ * This function is safe to run multiple times and will only process duplicates
+ * that exist at the time of execution.
+ *
+ * @returns {number} Number of duplicate groups merged
  */
 export function deduplicateSessions() {
   const dupes = db.prepare(`
@@ -627,9 +889,24 @@ export const upsertConversationStmt = db.prepare(`
 export const deleteConversationStmt = db.prepare(`DELETE FROM conversations WHERE id = $id`);
 
 // ---------------------------------------------------------------------------
-// Settings
+// Global Settings Schema
 // ---------------------------------------------------------------------------
 
+/**
+ * Settings Table
+ * --------------
+ * Global key-value store for server-wide configuration. Similar to user_settings
+ * but applies to all users and the server instance itself.
+ *
+ * Key Fields:
+ * - encrypted: 1 if value is encrypted, 0 if plaintext
+ * - value: Setting value (encrypted or plaintext)
+ *
+ * Use Cases:
+ * - Feature flags
+ * - Server configuration
+ * - API keys and secrets (encrypted)
+ */
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -647,5 +924,78 @@ export const upsertSettingStmt = db.prepare(`
   ON CONFLICT (key) DO UPDATE SET value = $value, encrypted = $encrypted, updated_at = datetime('now')
 `);
 export const deleteSettingStmt = db.prepare(`DELETE FROM settings WHERE key = $key`);
+
+// ---------------------------------------------------------------------------
+// Prepared Statements: Users & Authentication
+// ---------------------------------------------------------------------------
+
+/** Retrieves a user by their ID. */
+export const getUserByIdStmt = db.prepare(`SELECT * FROM users WHERE id = $id`);
+
+/** Retrieves a user by their Google ID. */
+export const getUserByGoogleIdStmt = db.prepare(`SELECT * FROM users WHERE google_id = $googleId`);
+
+/** Retrieves a user by their dashboard API key (for Bearer token auth). */
+export const getUserByApiKeyStmt = db.prepare(`SELECT * FROM users WHERE dashboard_api_key = $apiKey`);
+
+/** Creates or updates a user on Google ID conflict. */
+export const upsertUserStmt = db.prepare(`
+  INSERT INTO users (id, google_id, email, name, avatar_url, dashboard_api_key)
+  VALUES ($id, $googleId, $email, $name, $avatarUrl, $apiKey)
+  ON CONFLICT(google_id) DO UPDATE SET
+    email = $email,
+    name = $name,
+    avatar_url = $avatarUrl,
+    last_login_at = datetime('now')
+  RETURNING *
+`);
+
+/** Regenerates a user's dashboard API key. */
+export const updateUserApiKeyStmt = db.prepare(`
+  UPDATE users SET dashboard_api_key = $apiKey WHERE id = $id RETURNING *
+`);
+
+/** Retrieves all sessions scoped to a specific user. */
+export const getAllSessionsByUser = db.prepare(`
+  SELECT * FROM sessions WHERE user_id = $userId ORDER BY started_at DESC LIMIT 50
+`);
+
+/** Retrieves recent events scoped to a specific user. */
+export const getRecentEventsByUser = db.prepare(`
+  SELECT e.*, s.project_dir FROM events e
+  JOIN sessions s ON e.session_id = s.id
+  WHERE s.user_id = $userId
+  ORDER BY e.created_at DESC LIMIT 100
+`);
+
+/** Slim version of getRecentEventsByUser — excludes payload column. */
+export const getRecentEventsSlimByUser = db.prepare(`
+  SELECT e.id, e.session_id, e.type, e.tool_name, e.file_path, e.summary,
+         e.payload IS NOT NULL AS hasPayload, e.created_at, s.project_dir
+  FROM events e
+  JOIN sessions s ON e.session_id = s.id
+  WHERE s.user_id = $userId
+  ORDER BY e.created_at DESC LIMIT 100
+`);
+
+// ---------------------------------------------------------------------------
+// Prepared Statements: User Settings
+// ---------------------------------------------------------------------------
+
+/** Retrieves all settings for a specific user. */
+export const getUserSettingsStmt = db.prepare(`SELECT * FROM user_settings WHERE user_id = $userId ORDER BY key`);
+
+/** Retrieves a single setting for a specific user. */
+export const getUserSettingStmt = db.prepare(`SELECT * FROM user_settings WHERE user_id = $userId AND key = $key`);
+
+/** Creates or updates a user setting. */
+export const upsertUserSettingStmt = db.prepare(`
+  INSERT INTO user_settings (user_id, key, value, encrypted, updated_at)
+  VALUES ($userId, $key, $value, $encrypted, datetime('now'))
+  ON CONFLICT (user_id, key) DO UPDATE SET value = $value, encrypted = $encrypted, updated_at = datetime('now')
+`);
+
+/** Deletes a user setting. */
+export const deleteUserSettingStmt = db.prepare(`DELETE FROM user_settings WHERE user_id = $userId AND key = $key`);
 
 export default db;

@@ -4,14 +4,15 @@
  *
  * Endpoints:
  *   POST /api/sessions/:id/prompt        — Submit a prompt via bridge relay
- *   POST /api/sessions/:id/prompt/cancel — Cancel the active prompt
+ *   POST /api/sessions/:id/prompt/cancel — Cancel an active prompt
  *   GET  /api/sessions/:id/prompt/status — Check if a prompt is currently active
  *
  * The submit endpoint dispatches the prompt to the local-agent daemon over the
  * /bridge Socket.IO namespace. The daemon runs the Agent SDK locally and streams
  * chunk/done events back through the bridge, which relays them to UI clients.
  *
- * Only one prompt may be active per session — concurrent requests return HTTP 409.
+ * Each prompt is identified by a client-generated `instanceId` (auto-generated
+ * if not provided). Multiple instances can run concurrently for the same session.
  * If no local agent daemon is connected for the session's project, returns 503.
  *
  * Image attachments are passed as base64 in the bridge payload (no temp files).
@@ -30,6 +31,7 @@ import {
   isBridgeConnected,
   cancelPrompt,
   trackPromptRequest,
+  cancelBridgePrompt,
 } from "../prompt-adapter.js";
 
 const PROMPT_BODY_LIMIT = 15 * 1024 * 1024;
@@ -41,16 +43,12 @@ const PROMPT_BODY_LIMIT = 15 * 1024 * 1024;
  */
 export default async function promptRoutes(fastify) {
   fastify.post("/api/sessions/:sessionId/prompt", { bodyLimit: PROMPT_BODY_LIMIT }, async (req, reply) => {
-    const { prompt, permissionMode, image } = req.body ?? {};
+    const { prompt, permissionMode, image, instanceId: clientInstanceId, description, useWorktree } = req.body ?? {};
     if (!prompt) return reply.code(400).send({ error: "prompt is required" });
 
     const sessionId = await lookupSessionId(req.params.sessionId);
     const session = await getSession(sessionId);
     if (!session) return reply.code(404).send({ error: "Session not found" });
-
-    if (isBridgePromptActive(sessionId)) {
-      return reply.code(409).send({ error: "A prompt is already running for this session" });
-    }
 
     const cwd = session.worktree_dir || session.project_dir;
     if (!cwd || cwd === "unknown") {
@@ -61,16 +59,21 @@ export default async function promptRoutes(fastify) {
       return reply.code(503).send({ error: "No local agent connected for this project" });
     }
 
+    // Each prompt instance gets a unique ID — allows multiple concurrent prompts per session
+    const instanceId = clientInstanceId || randomUUID();
+
     // Build bridge payload — image passed as base64 (no temp file)
-    const requestId = randomUUID();
     const payload = {
-      requestId,
+      requestId: instanceId,
+      instanceId,
       sessionId,
       prompt,
       cwd,
       permissionMode: permissionMode || undefined,
       model: session.model || undefined,
       claudeSessionId: session.current_claude_session_id || undefined,
+      description: description || undefined,
+      useWorktree: useWorktree || undefined,
     };
 
     if (image && image.data && image.mimeType) {
@@ -80,20 +83,32 @@ export default async function promptRoutes(fastify) {
     broadcastToSession(sessionId, {
       type: "prompt:start",
       sessionId,
+      instanceId,
       prompt,
       hasImage: !!(image && image.data),
       permissionMode: permissionMode || null,
+      description: description || null,
+      useWorktree: !!useWorktree,
     });
 
-    // Track sessionId -> requestId for cancel-by-session
-    trackPromptRequest(sessionId, requestId);
+    // Track instanceId -> sessionId for cancel-by-session
+    trackPromptRequest(instanceId, sessionId);
 
     dispatchPromptToBridge(cwd, payload);
 
-    return { ok: true, sessionId };
+    return { ok: true, sessionId, instanceId };
   });
 
   fastify.post("/api/sessions/:sessionId/prompt/cancel", async (req) => {
+    const { instanceId } = req.body ?? {};
+
+    // When instanceId is provided, cancel that specific instance directly
+    if (instanceId) {
+      const cancelled = cancelBridgePrompt(instanceId);
+      return { ok: true, cancelled };
+    }
+
+    // Fall back to cancel-by-session (backward compat)
     const sessionId = await lookupSessionId(req.params.sessionId);
     const cancelled = cancelPrompt(sessionId);
     // Do not broadcast prompt:done here — the bridge prompt_done handler

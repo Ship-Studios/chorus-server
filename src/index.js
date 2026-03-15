@@ -7,7 +7,7 @@
  *  1. Create and configure the Fastify app (CORS, WebSocket, static files).
  *  2. Register the WebSocket `/ws` endpoint with client-cap and heartbeat.
  *  3. Register all REST API route plugins (sessions, events, diff, prompt,
- *     swarm, worktrees, diff-summary, commit, crafting).
+ *     worktrees, diff-summary, commit, crafting).
  *  4. Expose `/api/health` and `/api/vpn/reconfigure` utility endpoints.
  *  5. Detect VPN state and configure proxy/cert environment before listening.
  *  6. Serve the pre-built SvelteKit UI as static files in production.
@@ -86,6 +86,8 @@ import { initWatchers, shutdownWatchers } from "./git-watcher.js";
  * `VPN_DETECTION_TIMEOUT`, `WALMART_CERT_PATH`.
  */
 import { configureVpn, reconfigureVpn, vpnState } from "./vpn.js";
+import { isMultiUserMode, registerAuthPlugins, resolveUser, resolveUserFromHandshake } from "./auth.js";
+import authRoutes from "./routes/auth.js";
 
 // ---------------------------------------------------------------------------
 // Route plugins
@@ -108,9 +110,6 @@ import diffRoutes from "./routes/diff.js";
 
 /** @see {@link ./routes/prompt.js} — Prompt submission via `claude --resume`, streaming, cancellation. */
 import promptRoutes from "./routes/prompt.js";
-
-/** @see {@link ./routes/swarm.js} — Swarm agent spawning, cancellation, and listing. */
-import swarmRoutes from "./routes/swarm.js";
 
 /**
  * @see {@link ./routes/worktrees/index.js} — Git worktree lifecycle: list, diff, merge, discard,
@@ -153,6 +152,9 @@ import settingsRoutes from "./routes/settings.js";
  */
 import directoryRoutes from "./routes/directories.js";
 
+/** @see {@link ./routes/user-settings.js} — Per-user settings CRUD (multi-user mode). */
+import userSettingsRoutes from "./routes/user-settings.js";
+
 /**
  * @see {@link ./routes/bridge.js} — WebSocket bridge for local MCP server daemons.
  * `initBridge()`: Creates the /bridge Socket.IO namespace after setIO() is called.
@@ -178,7 +180,7 @@ const app = Fastify({ logger: true });
 const corsOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(",").map((o) => o.trim())
   : ["http://localhost:5173", "http://localhost:3001", "http://localhost:5174"];
-await app.register(cors, { origin: corsOrigins, methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] });
+await app.register(cors, { origin: corsOrigins, credentials: true, methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] });
 
 // Security headers — X-Content-Type-Options, X-Frame-Options, HSTS, Referrer-Policy, etc.
 // CSP is relaxed to allow inline styles (Tailwind), WebSocket connections, and data: URIs
@@ -214,41 +216,61 @@ await app.register(rateLimit, {
 });
 
 // ---------------------------------------------------------------------------
-// Optional API key authentication
+// Authentication
 // ---------------------------------------------------------------------------
-// When DASHBOARD_API_KEY is set, all /api/ endpoints (except health and static
-// file serving) require a matching Bearer token. This is opt-in: on localhost
-// without the env var, everything works as before. For network deployments,
-// set DASHBOARD_API_KEY to lock down destructive endpoints (commit, swarm, etc.).
-//
-// Hook scripts pass the same token via the Authorization header.
+// Two modes:
+//   1. Multi-user (GOOGLE_CLIENT_ID set): Google OAuth cookie sessions +
+//      per-user Bearer tokens (dashboard_api_key). Requires login for browser
+//      access. Hook endpoints resolve user from Bearer token for data scoping.
+//   2. Single-user (default): Optional DASHBOARD_API_KEY for network deployments.
+//      No login, no user model — existing behavior preserved.
 
 const DASHBOARD_API_KEY = process.env.DASHBOARD_API_KEY;
 
-if (DASHBOARD_API_KEY) {
-  app.addHook("onRequest", async (request, reply) => {
-    const { url } = request;
+// Register auth plugins (cookie, secure-session, oauth2) in multi-user mode.
+// Must run BEFORE route registration so session middleware is available.
+if (isMultiUserMode()) {
+  await registerAuthPlugins(app);
+}
 
-    // Exempt: health probe, static UI files, socket.io (handled separately)
-    if (url === "/api/health" || !url.startsWith("/api/")) return;
+// Unified auth middleware — handles both multi-user OAuth and single-user API key.
+app.addHook("onRequest", async (request, reply) => {
+  const { url } = request;
 
-    // Exempt: Claude Code HTTP hook endpoints — these come from localhost and
-    // don't support custom auth headers in Claude Code's settings.json config.
-    // They are event notifications (heartbeat, tool events), not destructive ops.
+  // Always exempt: health, static files, socket.io, auth endpoints
+  if (url === "/api/health" || !url.startsWith("/api/") || url.startsWith("/api/auth/")) return;
+
+  if (isMultiUserMode()) {
+    // Hook endpoints: resolve user for data scoping, but don't reject.
+    // Hooks may use the global DASHBOARD_API_KEY or a per-user key.
+    if (url.startsWith("/api/hooks/") || (url === "/api/sessions" && request.method === "POST")) {
+      request.user = await resolveUser(request);
+      return;
+    }
+
+    // All other /api/ routes: require authentication
+    request.user = await resolveUser(request);
+    if (!request.user) {
+      return reply.code(401).send({ error: "Authentication required" });
+    }
+    return;
+  }
+
+  // Single-user mode: existing DASHBOARD_API_KEY logic (unchanged)
+  if (DASHBOARD_API_KEY) {
     if (url.startsWith("/api/hooks/")) return;
-
-    // Exempt: session registration from hooks (session-start.sh sends auth when
-    // DASHBOARD_API_KEY is set, but the HTTP hooks that also call /api/sessions
-    // cannot add headers). Allow POST /api/sessions without auth since it's an
-    // upsert/heartbeat, not destructive.
     if (url === "/api/sessions" && request.method === "POST") return;
 
     const authHeader = request.headers.authorization;
     if (!authHeader || authHeader !== `Bearer ${DASHBOARD_API_KEY}`) {
       reply.code(401).send({ error: "Unauthorized — set DASHBOARD_API_KEY" });
     }
-  });
+  }
+});
 
+if (isMultiUserMode()) {
+  app.log.info("Multi-user authentication enabled (Google OAuth)");
+} else if (DASHBOARD_API_KEY) {
   app.log.info("API key authentication enabled (DASHBOARD_API_KEY is set)");
 }
 
@@ -296,22 +318,23 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
 // Route groups:
 //   Core data    — sessions, events (hook adapters, CRUD, queries)
 //   Code intel   — diff, diff-summary, commit
-//   Interaction  — prompt (--resume streaming), swarm (independent agents)
+//   Interaction  — prompt (bridge relay, multi-instance streaming)
 //   Isolation    — worktrees (git worktree lifecycle + merge/discard)
 //   Creative     — crafting (agent workbench + AI synthesis)
 
+await app.register(authRoutes);          // GET/POST /api/auth/{status,login,callback,logout,regenerate-key}
 await app.register(sessionRoutes);      // POST/GET/DELETE /api/sessions, POST /api/hooks/*
 await app.register(eventRoutes);        // POST/GET        /api/events, GET /api/events/:id, /api/sessions/:id/events
 await app.register(diffRoutes);         // GET              /api/sessions/:id/diff
 await app.register(promptRoutes);       // POST/GET         /api/sessions/:id/prompt{,/cancel,/status}
-await app.register(swarmRoutes);        // POST/GET         /api/sessions/:id/swarm/spawn, /api/swarm/:agentId/cancel
 await app.register(worktreeRoutes);     // GET/POST/DELETE  /api/sessions/:id/worktrees, /api/worktrees/:id/{diff,files,merge,check-conflicts}
 await app.register(diffSummaryRoutes);  // POST/GET         /api/sessions/:id/diff/summary, /api/diff-summary/status
 await app.register(commitRoutes);       // POST             /api/sessions/:id/commit
 await app.register(craftingRoutes);     // GET/POST/PUT/DELETE /api/craft/{agents,recipes}, POST /api/craft/synthesize
 await app.register(settingsRoutes);     // GET/PUT/DELETE /api/settings, GET /api/settings/test-anthropic
-await app.register(directoryRoutes);   // GET              /api/directories
-await app.register(bridgeRoutes);      // Socket.IO /bridge namespace (no HTTP routes)
+await app.register(directoryRoutes);    // GET              /api/directories
+await app.register(userSettingsRoutes); // GET/PUT/DELETE   /api/user/settings (multi-user)
+await app.register(bridgeRoutes);       // Socket.IO /bridge namespace (no HTTP routes)
 
 /**
  * Clean up duplicate sessions from prior TOCTOU races in resolveSessionId().
@@ -498,7 +521,7 @@ await configureVpn();
 await app.ready();
 
 io = new SocketIO(app.server, {
-  cors: { origin: corsOrigins },
+  cors: { origin: corsOrigins, credentials: true },
   pingInterval: 30_000,
   pingTimeout: 10_000,
   maxHttpBufferSize: 1_000_000,
@@ -509,8 +532,25 @@ setIO(io);
 // Must be called after setIO() so getIO() returns the live instance.
 initBridge();
 
-// Socket.IO auth middleware — reject unauthenticated connections when API key is set.
-if (DASHBOARD_API_KEY) {
+// Socket.IO auth middleware — multi-user or single-user API key.
+if (isMultiUserMode()) {
+  io.use(async (socket, next) => {
+    try {
+      const user = await resolveUserFromHandshake(socket.handshake);
+      if (user) {
+        socket.user = user;
+        return next();
+      }
+      // Also accept global DASHBOARD_API_KEY for admin/automation
+      if (DASHBOARD_API_KEY && socket.handshake.auth?.token === DASHBOARD_API_KEY) {
+        return next();
+      }
+      next(new Error("Authentication required"));
+    } catch (err) {
+      next(new Error("Authentication failed"));
+    }
+  });
+} else if (DASHBOARD_API_KEY) {
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token;
     if (token === DASHBOARD_API_KEY) return next();

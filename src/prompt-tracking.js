@@ -1,8 +1,8 @@
 /**
- * prompt-tracking.js — Session-to-requestId mapping for prompt lifecycle.
+ * prompt-tracking.js — Instance-to-session mapping for prompt lifecycle.
  *
- * Provides tracking and cancellation of active prompts by session ID.
- * Works in conjunction with bridge-backed prompt operations.
+ * Provides tracking and cancellation of active prompts by session ID or
+ * instance ID. Works in conjunction with bridge-backed prompt operations.
  *
  * @module prompt-tracking
  */
@@ -11,27 +11,27 @@ import { cancelBridgePrompt, isBridgePromptActive } from "./routes/bridge.js";
 import { onBroadcastToSession } from "./broadcast.js";
 
 /**
- * Session-to-requestId mapping for prompt cancel-by-session.
+ * Instance-to-session mapping for prompt tracking and cancel-by-session.
  * Populated by routes that call dispatchPromptToBridge.
  * @type {Map<string, string>}
  */
-const sessionToRequestId = new Map();
+const instanceToSession = new Map();
 
 /**
- * Track a sessionId -> requestId mapping (called by prompt route on dispatch).
+ * Track an instanceId -> sessionId mapping (called by prompt route on dispatch).
+ * @param {string} instanceId
  * @param {string} sessionId
- * @param {string} requestId
  */
-export function trackPromptRequest(sessionId, requestId) {
-  sessionToRequestId.set(sessionId, requestId);
+export function trackPromptRequest(instanceId, sessionId) {
+  instanceToSession.set(instanceId, sessionId);
 }
 
 /**
- * Remove a sessionId -> requestId mapping (called when prompt completes).
- * @param {string} sessionId
+ * Remove an instanceId -> sessionId mapping (called when prompt completes).
+ * @param {string} instanceId
  */
-export function untrackPromptRequest(sessionId) {
-  sessionToRequestId.delete(sessionId);
+export function untrackPromptRequest(instanceId) {
+  instanceToSession.delete(instanceId);
 }
 
 /**
@@ -46,15 +46,19 @@ export function isPromptActive(sessionId) {
 
 /**
  * Cancel an active prompt by session ID.
- * Backward-compatible with the old cancelPrompt(sessionId) signature.
+ * Finds the instanceId for the given session and cancels via bridge.
  * @param {string} sessionId
  * @returns {boolean}
  */
 export function cancelPrompt(sessionId) {
-  const requestId = sessionToRequestId.get(sessionId);
-  if (!requestId) return false;
-  sessionToRequestId.delete(sessionId);
-  return cancelBridgePrompt(requestId);
+  // Find instanceId for this session
+  for (const [instanceId, sid] of instanceToSession) {
+    if (sid === sessionId) {
+      instanceToSession.delete(instanceId);
+      return cancelBridgePrompt(instanceId);
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +70,7 @@ export function cancelPrompt(sessionId) {
 onBroadcastToSession((_sessionId, message) => {
   if (!message) return;
 
-  if (message.type === "prompt:done" && message.sessionId) {
-    sessionToRequestId.delete(message.sessionId);
+  if (message.type === "prompt:done" && message.instanceId) {
+    instanceToSession.delete(message.instanceId);
   }
 });
