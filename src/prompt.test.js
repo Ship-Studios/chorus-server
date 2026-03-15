@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import { isPromptActive, cancelPrompt } from "./prompt-tracking.js";
-import { cancelSwarmAgent, getActiveSwarmAgents } from "./swarm-tracking.js";
+import { cancelAgent, getActiveAgents } from "./swarm-tracking.js";
 import { getCurrentBranch, getBranchDiffStats, detectConflicts } from "./git-worktree.js";
 
 // getPromptSessionId was deprecated — stub for backward-compat tests
@@ -51,27 +51,27 @@ describe("getPromptSessionId", () => {
   });
 });
 
-describe("cancelSwarmAgent", () => {
+describe("cancelAgent", () => {
   it("returns { cancelled: false } for non-existent agent", () => {
-    expect(cancelSwarmAgent("nonexistent-agent")).toEqual({ cancelled: false });
+    expect(cancelAgent("nonexistent-agent")).toEqual({ cancelled: false });
   });
 
   it("returns { cancelled: false } for empty id", () => {
-    expect(cancelSwarmAgent("")).toEqual({ cancelled: false });
+    expect(cancelAgent("")).toEqual({ cancelled: false });
   });
 });
 
-describe("getActiveSwarmAgents", () => {
+describe("getActiveAgents", () => {
   it("returns empty array when no agents are active", () => {
-    expect(getActiveSwarmAgents("any-session")).toEqual([]);
+    expect(getActiveAgents("any-session")).toEqual([]);
   });
 
   it("returns empty array when called without sessionId filter", () => {
-    expect(getActiveSwarmAgents()).toEqual([]);
+    expect(getActiveAgents()).toEqual([]);
   });
 
   it("returns empty array for undefined sessionId", () => {
-    expect(getActiveSwarmAgents(undefined)).toEqual([]);
+    expect(getActiveAgents(undefined)).toEqual([]);
   });
 });
 

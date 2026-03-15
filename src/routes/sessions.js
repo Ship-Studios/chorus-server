@@ -10,7 +10,7 @@ import {
 } from "../db-adapter.js";
 import { resolveSessionId, lookupSessionId } from "../session-resolver.js";
 import { isPromptActive, cancelPrompt } from "../prompt-adapter.js";
-import { getActiveSwarmAgents, cancelSwarmAgent } from "../swarm-tracking.js";
+import { getActiveAgents, cancelAgent } from "../swarm-tracking.js";
 import { startWatching, stopWatching } from "../git-watcher.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
 import { clearSessionSyncState } from "../session-sync.js";
@@ -50,14 +50,14 @@ export default async function sessionRoutes(fastify) {
       return reply.code(400).send({ error: "sessionId is required" });
     }
 
-    // When a swarm agent panel sends its agentId, force a new session
+    // When a spawned agent panel sends its agentId, force a new session
     // (skip alias resolution which would merge it into the parent session).
     let sessionId;
     if (swarmAgentId) {
       sessionId = claudeSessionId;
       await insertAlias(claudeSessionId, claudeSessionId);
     } else {
-      sessionId = await resolveSessionId(claudeSessionId, projectDir, request.user?.id);
+      sessionId = await resolveSessionId(claudeSessionId, projectDir, req.user?.id);
     }
 
     const currentSession = await getSession(sessionId);
@@ -199,8 +199,8 @@ export default async function sessionRoutes(fastify) {
     // Force-stop active resources before deletion
     stopWatching(sessionId, session.worktree_dir || session.project_dir);
     cancelPrompt(sessionId);
-    for (const agent of getActiveSwarmAgents(sessionId)) {
-      cancelSwarmAgent(agent.id);
+    for (const agent of getActiveAgents(sessionId)) {
+      cancelAgent(agent.id);
     }
 
     // Mark stopped so deleteSession() allows the DB cascade

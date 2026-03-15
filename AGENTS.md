@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`src/` contains the server entrypoint and all runtime modules. [`src/index.js`](packages/server/src/index.js) wires Fastify, WebSocket broadcasting, static UI serving, and route registration. Route plugins live in `src/routes/` and use focused modules such as `db.js`, `prompt.js`, `git-worktree.js`, and `swarm-manager.js`. Tests are colocated in `src/` as `*.test.js`; eval scripts and fixtures live under `src/evals/`.
+`src/` contains the server entrypoint and all runtime modules. [`src/index.js`](packages/server/src/index.js) wires Fastify, WebSocket broadcasting, static UI serving, and route registration. Route plugins live in `src/routes/` and use focused modules such as `db.js`, `prompt.js`, and `git-worktree.js`. Tests are colocated in `src/` as `*.test.js`; eval scripts and fixtures live under `src/evals/`.
 
 ## Build, Test, and Development Commands
 Use Bun from the monorepo root or this package directory.

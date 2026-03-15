@@ -3,7 +3,7 @@
 This document provides instructional context for Gemini when working within the `@chorus/server` package.
 
 ## Project Overview
-The **Chorus Server** is a Fastify 5 backend designed to receive, persist, and broadcast real-time events from the Claude Code CLI. It serves as the central hub for the Chorus ecosystem, managing sessions, git diffs, AI-powered summaries, and "swarm" agent orchestration.
+The **Chorus Server** is a Fastify 5 backend designed to receive, persist, and broadcast real-time events from the Claude Code CLI. It serves as the central hub for the Chorus ecosystem, managing sessions, git diffs, AI-powered summaries, and agent orchestration.
 
 ### Core Technologies
 - **Runtime:** [Bun](https://bun.sh/) (used for execution, testing, and SQLite).

@@ -39,6 +39,7 @@ import {
   updateWorktreeStats,
   updateWorktreeConflicts,
   getWorktree,
+  updateSessionClaudeId,
 } from "../db-adapter.js";
 import { invalidateDashboardSnapshot } from "../dashboard-snapshot.js";
 import { invalidateDiscoveredWorktrees } from "../worktree-discovery.js";
@@ -181,8 +182,16 @@ export function initBridge() {
     });
 
     // ── prompt_done ──────────────────────────────────────────────────────────
-    socket.on("prompt_done", async ({ instanceId, sessionId, exitCode, error, cancelled, freshSession, worktreeStats, description } = {}) => {
+    socket.on("prompt_done", async ({ instanceId, sessionId, exitCode, error, cancelled, freshSession, worktreeStats, description, sdkSessionId } = {}) => {
       if (!sessionId) return;
+
+      // Persist the Agent SDK session ID for future resume — fire-and-forget,
+      // it's only needed on the next prompt so it doesn't block the done broadcast.
+      if (sdkSessionId && !cancelled && !error) {
+        updateSessionClaudeId(sessionId, sdkSessionId).catch((err) =>
+          console.error(`[bridge] failed to update claude session ID for ${sessionId}:`, err.message),
+        );
+      }
 
       // If the prompt produced worktree stats, persist to DB
       if (worktreeStats) {

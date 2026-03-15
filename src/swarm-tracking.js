@@ -1,8 +1,8 @@
 /**
- * swarm-tracking.js — Swarm agent lifecycle tracking and management.
+ * swarm-tracking.js — Agent lifecycle tracking and management.
  *
- * Provides in-memory tracking of active swarm agents, cancellation, and
- * concurrency management. Works in conjunction with bridge-backed swarm operations.
+ * Provides in-memory tracking of active spawned agents, cancellation, and
+ * concurrency management. Works in conjunction with bridge-backed operations.
  *
  * @module swarm-tracking
  */
@@ -11,51 +11,49 @@ import { cancelBridgePrompt } from "./routes/bridge.js";
 import { onBroadcastToSession } from "./broadcast.js";
 
 /**
- * Active swarm agents tracked by this adapter.
+ * Active agents tracked by this adapter.
  * Keyed by agentId -> { id, description, status, startedAt, sessionId }.
  * @type {Map<string, object>}
  */
-const activeSwarmAgentMap = new Map();
+const activeAgentMap = new Map();
 
 /**
- * Track a swarm agent (called by swarm route on dispatch).
+ * Track an agent (called on dispatch).
  * @param {object} agent - { id, description, status, startedAt, sessionId }
  */
-export function trackSwarmAgent(agent) {
-  activeSwarmAgentMap.set(agent.id, agent);
+export function trackAgent(agent) {
+  activeAgentMap.set(agent.id, agent);
 }
 
 /**
- * Remove a swarm agent from tracking (called when swarm completes via bridge event).
+ * Remove an agent from tracking (called when it completes via bridge event).
  * @param {string} agentId
  */
-export function untrackSwarmAgent(agentId) {
-  activeSwarmAgentMap.delete(agentId);
+export function untrackAgent(agentId) {
+  activeAgentMap.delete(agentId);
 }
 
 /**
- * Cancel a swarm agent by agentId.
- * Backward-compatible with the old cancelSwarmAgent(agentId) signature.
+ * Cancel an agent by agentId.
  * @param {string} agentId
  * @returns {{ cancelled: boolean }}
  */
-export function cancelSwarmAgent(agentId) {
+export function cancelAgent(agentId) {
   const cancelled = cancelBridgePrompt(agentId);
   if (cancelled) {
-    activeSwarmAgentMap.delete(agentId);
+    activeAgentMap.delete(agentId);
   }
   return { cancelled };
 }
 
 /**
- * Get active swarm agents, optionally filtered by session.
- * Backward-compatible with the old getActiveSwarmAgents(sessionId) signature.
+ * Get active agents, optionally filtered by session.
  * @param {string} [sessionId]
  * @returns {Array<object>}
  */
-export function getActiveSwarmAgents(sessionId) {
+export function getActiveAgents(sessionId) {
   const results = [];
-  for (const agent of activeSwarmAgentMap.values()) {
+  for (const agent of activeAgentMap.values()) {
     if (!sessionId || agent.sessionId === sessionId) {
       results.push({ ...agent });
     }
@@ -64,23 +62,29 @@ export function getActiveSwarmAgents(sessionId) {
 }
 
 /**
- * Check if there are any active swarm agents.
+ * Check if there are any active agents.
  * @returns {boolean}
  */
-export function hasActiveSwarmAgents() {
-  return activeSwarmAgentMap.size > 0;
+export function hasActiveAgents() {
+  return activeAgentMap.size > 0;
 }
 
 // ---------------------------------------------------------------------------
 // Auto-cleanup via broadcast interceptor
 // ---------------------------------------------------------------------------
-// When bridge.js relays swarm:done through broadcastToSession, this
-// interceptor cleans up our local tracking map automatically.
+// When a prompt:done or agent completion event flows through broadcastToSession,
+// this interceptor cleans up our local tracking map automatically.
+//
+// Exported as a named function so unit tests can invoke it directly without
+// depending on the broadcast wiring (which may not re-run when the module is
+// pre-cached by another test file's import).
 
-onBroadcastToSession((_sessionId, message) => {
+export function _broadcastInterceptor(_sessionId, message) {
   if (!message) return;
 
-  if (message.type === "swarm:done" && message.agentId) {
-    activeSwarmAgentMap.delete(message.agentId);
+  if (message.type === "prompt:done" && message.instanceId) {
+    activeAgentMap.delete(message.instanceId);
   }
-});
+}
+
+onBroadcastToSession(_broadcastInterceptor);

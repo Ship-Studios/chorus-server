@@ -444,6 +444,11 @@ export const touchSessionActive = db.prepare(`
   UPDATE sessions SET status = 'active', last_seen_at = datetime('now') WHERE id = $id
 `);
 
+/** Updates the current_claude_session_id for Agent SDK resume. */
+export const updateSessionClaudeId = db.prepare(`
+  UPDATE sessions SET current_claude_session_id = $claudeSessionId WHERE id = $id
+`);
+
 // ---------------------------------------------------------------------------
 // Prepared Statements: Events
 // ---------------------------------------------------------------------------
@@ -887,6 +892,24 @@ export const upsertConversationStmt = db.prepare(`
 
 /** Deletes a conversation by its ID. */
 export const deleteConversationStmt = db.prepare(`DELETE FROM conversations WHERE id = $id`);
+
+/** Atomically appends messages to an existing conversation. Returns false if conversation not found. */
+export function appendMessagesRaw(id, newMessages) {
+  return db.transaction(() => {
+    const row = getConversationStmt.get({ $id: id });
+    if (!row) return false;
+    const existing = JSON.parse(row.messages || "[]");
+    existing.push(...newMessages);
+    upsertConversationStmt.run({
+      $id: id,
+      $messages: JSON.stringify(existing),
+      $systemPrompt: null,
+      $model: null,
+      $totalTokens: null,
+    });
+    return true;
+  })();
+}
 
 // ---------------------------------------------------------------------------
 // Global Settings Schema
