@@ -18,6 +18,7 @@ export {
   upsertSession,
   updateSessionGitRoot,
   updateSessionStatus,
+  updateSessionClaudeId,
   touchSessionActive,
   getSession,
   getActiveSessions,

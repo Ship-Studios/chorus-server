@@ -181,6 +181,24 @@ export async function touchSessionActive(id) {
 }
 
 /**
+ * Persists the most recent Claude CLI / Agent SDK session ID on a dashboard session.
+ * Used for prompt resume — the next prompt can pass this ID to the SDK to continue
+ * the same conversation.
+ *
+ * @param {string} id - Dashboard session ID
+ * @param {string} claudeSessionId - The Agent SDK session identifier
+ * @returns {Promise<{ changes: number }>}
+ */
+export async function updateSessionClaudeId(id, claudeSessionId) {
+  const result = await sql`
+    UPDATE sessions
+    SET current_claude_session_id = ${claudeSessionId}
+    WHERE id = ${id}
+  `;
+  return { changes: result.count };
+}
+
+/**
  * Retrieves a single session by its ID.
  *
  * @param {string} id - Session identifier
