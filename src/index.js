@@ -62,7 +62,7 @@ import { setIO } from "./socket.js";
  * Uses `bun:sqlite` in WAL mode with `$paramName` binding syntax.
  * `deduplicateSessions()` cleans up TOCTOU race duplicates from `resolveSessionId()`.
  */
-import { getActiveSessions, deduplicateSessions, pruneOldData, reconcileOrphanedSessions } from "./db-adapter.js";
+import { getActiveSessions, deduplicateSessions, pruneOldData, reconcileOrphanedSessions, getAllSettings } from "./db-adapter.js";
 import { getDashboardSnapshot } from "./dashboard-snapshot.js";
 
 /**
@@ -138,6 +138,12 @@ import commitRoutes, { resetClient as resetCommitClient } from "./routes/commit.
  * Synthesis uses `claude-sonnet-4-6`. Model param validated via regex.
  */
 import craftingRoutes, { resetClient as resetCraftingClient } from "./routes/crafting.js";
+
+/**
+ * @see {@link ./routes/settings.js} — Runtime configuration: API keys, models, preferences.
+ * GET/PUT/DELETE /api/settings, GET /api/settings/test-anthropic.
+ */
+import settingsRoutes from "./routes/settings.js";
 
 /**
  * @see {@link ./routes/directories.js} — Lists directories under ~/Documents/code for sidebar nav.
@@ -303,6 +309,7 @@ await app.register(worktreeRoutes);     // GET/POST/DELETE  /api/sessions/:id/wo
 await app.register(diffSummaryRoutes);  // POST/GET         /api/sessions/:id/diff/summary, /api/diff-summary/status
 await app.register(commitRoutes);       // POST             /api/sessions/:id/commit
 await app.register(craftingRoutes);     // GET/POST/PUT/DELETE /api/craft/{agents,recipes}, POST /api/craft/synthesize
+await app.register(settingsRoutes);     // GET/PUT/DELETE /api/settings, GET /api/settings/test-anthropic
 await app.register(directoryRoutes);   // GET              /api/directories
 await app.register(bridgeRoutes);      // Socket.IO /bridge namespace (no HTTP routes)
 
@@ -313,6 +320,21 @@ await app.register(bridgeRoutes);      // Socket.IO /bridge namespace (no HTTP r
  * every startup — idempotent dedup that keeps the most recently seen session.
  */
 await deduplicateSessions();
+
+// Load DB settings into process.env (env vars take precedence)
+try {
+  const dbSettings = await getAllSettings();
+  let loaded = 0;
+  for (const { key, value } of dbSettings) {
+    if (!process.env[key]) {
+      process.env[key] = value;
+      loaded++;
+    }
+  }
+  if (loaded > 0) app.log.info(`[settings] Loaded ${loaded} setting(s) from database`);
+} catch (err) {
+  app.log.warn(`[settings] Failed to load settings: ${err.message}`);
+}
 
 // Orphan reconciliation — mark active sessions as stopped if they haven't
 // been seen in 30 minutes (likely orphaned by a prior server crash).
@@ -531,4 +553,4 @@ io.on("connection", (socket) => {
 const HOST = process.env.HOST ?? "127.0.0.1";
 
 await app.listen({ port: Number(PORT), host: HOST });
-console.log(`Agent Dashboard server running on http://localhost:${PORT}`);
+console.log(`Agent Dashboard server running on http://${HOST}:${PORT}`);

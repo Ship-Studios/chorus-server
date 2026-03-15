@@ -426,3 +426,31 @@ export async function appendMessages(id, newMessages) {
 export async function deleteConversation(id) {
   await sql`DELETE FROM conversations WHERE id = ${id}`;
 }
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+export async function getAllSettings() {
+  return sql`SELECT * FROM settings ORDER BY key`;
+}
+
+export async function getSetting(key) {
+  const [row] = await sql`SELECT * FROM settings WHERE key = ${key}`;
+  return row ?? null;
+}
+
+export async function upsertSetting(key, value, encrypted = false) {
+  await sql`
+    INSERT INTO settings (key, value, encrypted, updated_at)
+    VALUES (${key}, ${value}, ${encrypted}, NOW())
+    ON CONFLICT (key) DO UPDATE SET
+      value = ${value},
+      encrypted = ${encrypted},
+      updated_at = NOW()
+  `;
+}
+
+export async function deleteSetting(key) {
+  await sql`DELETE FROM settings WHERE key = ${key}`;
+}

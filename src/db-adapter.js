@@ -360,6 +360,26 @@ if (process.env.SUPABASE_DB_URL) {
   }
 
   // -------------------------------------------------------------------------
+  // Settings
+  // -------------------------------------------------------------------------
+
+  async function getAllSettings() {
+    return s.getAllSettingsStmt.all();
+  }
+
+  async function getSetting(key) {
+    return s.getSettingStmt.get({ $key: key }) ?? null;
+  }
+
+  async function upsertSetting(key, value, encrypted = false) {
+    return s.upsertSettingStmt.run({ $key: key, $value: value, $encrypted: encrypted ? 1 : 0 });
+  }
+
+  async function deleteSetting(key) {
+    return s.deleteSettingStmt.run({ $key: key });
+  }
+
+  // -------------------------------------------------------------------------
   // Maintenance / cleanup
   // -------------------------------------------------------------------------
 
@@ -433,6 +453,10 @@ if (process.env.SUPABASE_DB_URL) {
     upsertConversation,
     appendMessages,
     deleteConversation,
+    getAllSettings,
+    getSetting,
+    upsertSetting,
+    deleteSetting,
   };
 }
 
@@ -494,4 +518,8 @@ export const {
   upsertConversation,
   appendMessages,
   deleteConversation,
+  getAllSettings,
+  getSetting,
+  upsertSetting,
+  deleteSetting,
 } = _impl;

@@ -38,6 +38,10 @@ export {
   upsertConversation,
   appendMessages,
   deleteConversation,
+  getAllSettings,
+  getSetting,
+  upsertSetting,
+  deleteSetting,
 } from "./db-pg.js";
 
 // Agents + worktrees + crafting + maintenance

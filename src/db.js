@@ -626,4 +626,26 @@ export const upsertConversationStmt = db.prepare(`
 /** Deletes a conversation by its ID. */
 export const deleteConversationStmt = db.prepare(`DELETE FROM conversations WHERE id = $id`);
 
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    encrypted INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+export const getAllSettingsStmt = db.prepare(`SELECT * FROM settings ORDER BY key`);
+export const getSettingStmt = db.prepare(`SELECT * FROM settings WHERE key = $key`);
+export const upsertSettingStmt = db.prepare(`
+  INSERT INTO settings (key, value, encrypted, updated_at)
+  VALUES ($key, $value, $encrypted, datetime('now'))
+  ON CONFLICT (key) DO UPDATE SET value = $value, encrypted = $encrypted, updated_at = datetime('now')
+`);
+export const deleteSettingStmt = db.prepare(`DELETE FROM settings WHERE key = $key`);
+
 export default db;

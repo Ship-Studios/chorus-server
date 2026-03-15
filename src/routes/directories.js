@@ -38,6 +38,12 @@ export default async function directoryRoutes(fastify) {
       cachedAt = Date.now();
       return cachedResponse;
     } catch (err) {
+      // On cloud deployments the local directory doesn't exist — return empty list
+      if (err.code === "ENOENT") {
+        cachedResponse = { directories: [], basePath: CODE_DIR };
+        cachedAt = Date.now();
+        return cachedResponse;
+      }
       reply.code(500);
       return { error: "Failed to list directories", message: err.message };
     }
