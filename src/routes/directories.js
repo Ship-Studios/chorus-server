@@ -16,6 +16,12 @@ const DIRECTORY_CACHE_TTL_MS = 5_000;
 let cachedResponse = null;
 let cachedAt = 0;
 
+/** Reset the in-memory cache. Exported for use in tests only. */
+export function clearDirectoryCache() {
+  cachedResponse = null;
+  cachedAt = 0;
+}
+
 /**
  * Fastify plugin for directory routes.
  *
