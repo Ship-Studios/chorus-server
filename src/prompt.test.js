@@ -9,7 +9,7 @@ import {
   getCurrentBranch,
   getBranchDiffStats,
   detectConflicts,
-} from "./prompt.js";
+} from "./prompt-sdk.js";
 
 /**
  * Tests for prompt.js — state management functions and exported git helpers.

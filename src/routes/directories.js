@@ -7,7 +7,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const CODE_DIR = process.env.CHORUS_ROOT_DIR || process.env.PULSE_ROOT_DIR || join(homedir(), "Documents", "code");
+const CODE_DIR = process.env.CHORUS_ROOT_DIR || join(homedir(), "Documents", "code");
 const DIRECTORY_CACHE_TTL_MS = 5_000;
 
 let cachedResponse = null;
